@@ -20,6 +20,21 @@ python -m http.server 8000
 # then open http://localhost:8000
 ```
 
+## The interface
+
+The map is the interface. It fills the window and everything else floats over
+it, so no panel ever steals width from the network:
+
+- **Top bar** — clock, operating phase, live system grade.
+- **Metric strip** — six network indicators with inline trend traces.
+- **Day timeline** — the shift laid out end to end: demand phases as bands,
+  scheduled events as ticks, and a playhead showing where you are.
+- **Control panel** — either the current situation, or the selected asset.
+- **Event ticker** — the latest log line; click to expand the full log.
+
+Selecting a junction or road replaces the situation card with its controls.
+Everything else stays out of the way until it is needed.
+
 ## The three shifts
 
 | Scenario | Character |
@@ -28,8 +43,29 @@ python -m http.server 8000
 | **Event Day** | A stadium lets out mid-shift; one district absorbs the surge. |
 | **Emergency** | A serious collision plus an inbound response vehicle — keep the city moving while clearing a corridor. |
 
-Each scenario is a full day cycle: morning peak, midday, evening peak,
-overnight. Press **Space** to hold the clock while you study the network.
+Press **Space** to hold the clock while you study the network.
+
+## Reading the grade
+
+The letter in the top bar is the *same* weighted composite the post-run report
+closes on — traffic efficiency 28%, public impact 20%, resilience 18%, resource
+efficiency 16%, emergency response 12%, stability 6%. The situation card breaks
+that composite into its components live, so you can see which part of your
+performance is holding the grade down while there is still time to act.
+
+Doing nothing scores in the mid-50s. Engaged play can do meaningfully better —
+or worse, if you over-correct.
+
+## Seeing the consequences
+
+Every intervention snapshots the network and re-measures it about 26 seconds
+later. When that measurement lands, badges appear **on the map** at the places
+that actually moved. Raise green time at a junction and you will typically see
+one green badge there and one red badge somewhere else: the second-order effect,
+drawn where it happened rather than asserted in a text box.
+
+The same measurements are written up in prose in the post-run analysis under
+*System Consequences*.
 
 ## How it works
 
@@ -47,34 +83,40 @@ overnight. Press **Space** to hold the clock while you study the network.
   corridor synchronisation harmonises cycle and offsets without stealing
   green from the dominant movement.
 - **Consequences** — every intervention snapshots the network and re-measures
-  ~26 s later; the log and post-run report show the *measured* second-order
-  effects, not canned numbers.
-- **Scoring** — weighted composite of traffic efficiency, network stability,
-  resource efficiency (return on spend), public impact, emergency response
-  and resilience. Doing nothing scores in the mid-50s; engaged play can do
-  meaningfully better — or worse, if you over-correct.
+  it later; the map badges, the event log and the report all read from those
+  measurements, never from canned numbers.
 
 ## Controls
 
-| Key | Action |
+| Input | Action |
 |---|---|
+| Scroll | Zoom about the cursor |
+| Drag | Pan the map |
+| Double-click a junction | Focus it |
+| Click | Select a junction or road |
 | `Space` | Hold / resume the clock |
 | `1` `2` `4` | Simulation speed |
-| `←` `→` | Cycle through junctions |
-| `Esc` | Deselect asset |
-| `H` | How-to overlay (mid-game: resume) |
-
-Click any junction or road on the map to open its control surface.
+| `←` `→` | Step through junctions |
+| `F` | Fit the network to view |
+| `Esc` | Deselect |
+| `H` | Operating brief (mid-game: resume) |
 
 ## Development
 
-Test harnesses are excluded from the repo but kept locally by convention:
+Test harnesses are gitignored but kept locally by convention:
 
+- `_verify.js` — simulation invariants: scenario baselines, determinism,
+  intervention settling, badge emission and expiry, closure cascade, live
+  grade agreement, budget floor
 - `_calib.js` — lever-by-lever scoring calibration across scenarios
 - `_ev.js` — emergency-vehicle lifecycle and corridor payoff
 - `_order.js` — vehicle ordering / storage invariants
 - `_probe.js` — scenario-level invariants (spawn totals, over-capacity)
-- `_shot.js` / `_shot.sh` — headless-Chrome screenshot driver
+- `_shot.sh` / `_shot.js` — headless-Chrome screenshot driver
+
+```bash
+node _verify.js     # expects "N passed, 0 failed"
+```
 
 ## Stack
 

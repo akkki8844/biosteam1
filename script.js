@@ -547,6 +547,12 @@ class Simulation {
     this.shockStart = -1;
     this.flowSamples = [];
 
+    /* Short-lived consequence badges drawn on the map when an intervention
+       settles, and a throttle for the live grade. */
+    this.flashes = [];
+    this._live = null;
+    this._liveAt = -99;
+
     this.evRequest = null;
     this.buildBusRoutes();
     this.applyInit();
@@ -1419,8 +1425,89 @@ class Simulation {
 
   settleInterventions() {
     for (const rec of this.interventions) {
-      if (!rec.after && this.time >= rec.measureAt) rec.after = this.snapshot();
+      if (!rec.after && this.time >= rec.measureAt) {
+        rec.after = this.snapshot();
+        this.emitFlashes(rec);
+      }
     }
+  }
+
+  /* ---------- consequence badges ---------- */
+
+  flash(x, y, text, kind) {
+    const col = kind === 'good' ? '#4fbe8d' : kind === 'bad' ? '#d05a4e' : '#d7a23f';
+    this.flashes.push({ x, y, text, col, born: this.time, life: 7 });
+    if (this.flashes.length > 40) this.flashes.shift();
+  }
+
+  roadNote(name) {
+    const rd = this.roads.find(r => r.name === name && !r.rev) || this.roads.find(r => r.name === name);
+    if (!rd) return null;
+    return rd.posAt(rd.len * 0.5, { x: 0, y: 0, angle: 0 });
+  }
+
+  /* Turn a settled intervention into map badges: what moved, and where. The
+     report explains it in prose; this is the same measurement shown in place,
+     so a knock-on three junctions away is impossible to miss. */
+  emitFlashes(rec) {
+    const spec = rec.spec || {};
+    const group = (spec.group && spec.group.length) ? spec.group
+      : (spec.nodeId != null ? [spec.nodeId] : []);
+    const inGroup = new Set(group);
+    const WAIT_SIG = 2.5, SAT_SIG = 5, CONG_SIG = 6;
+
+    /* the surface that was actually touched */
+    if (spec.nodeId != null) {
+      const n = this.city.nodeById[spec.nodeId];
+      const b = rec.before.nodeWait[spec.nodeId] || 0;
+      const d = (rec.after.nodeWait[spec.nodeId] || 0) - b;
+      if (n && Math.abs(d) >= WAIT_SIG) {
+        this.flash(n.x, n.y, `${d > 0 ? '+' : '\u2212'}${Math.abs(d).toFixed(1)}s WAIT`, d < 0 ? 'good' : 'bad');
+      }
+    } else if (spec.roadName && !spec.closed) {
+      /* A closure is excluded here: "−71% load" on a road that is now shut is a
+         tautology, and the badges that matter are the knock-ons it causes. */
+      const note = this.roadNote(spec.roadName);
+      const b = (rec.before.roadSat[spec.roadName] || 0) * 100;
+      const d = (rec.after.roadSat[spec.roadName] || 0) * 100 - b;
+      if (note && Math.abs(d) >= SAT_SIG) {
+        this.flash(note.x, note.y, `${d > 0 ? '+' : '\u2212'}${Math.abs(d).toFixed(0)}% LOAD`, d < 0 ? 'good' : 'bad');
+      }
+    }
+
+    /* the largest adverse second-order effect, reported wherever it landed */
+    let worst = null;
+    for (const n of this.nodes) {
+      if (inGroup.has(n.id)) continue;
+      const dc = rec.after.nodeCong[n.id] - rec.before.nodeCong[n.id];
+      const dw = rec.after.nodeWait[n.id] - rec.before.nodeWait[n.id];
+      const sev = Math.max(dc / (CONG_SIG * 1.4), dw / (WAIT_SIG * 1.4));
+      if (sev >= 1 && (!worst || sev > worst.sev)) worst = { sev, n, dc, dw };
+    }
+    if (worst) {
+      const byCong = worst.dc / (CONG_SIG * 1.4) >= worst.dw / (WAIT_SIG * 1.4);
+      this.flash(worst.n.x, worst.n.y,
+        byCong ? `+${worst.dc.toFixed(0)} CONG` : `+${worst.dw.toFixed(1)}s WAIT`, 'bad');
+      return;
+    }
+
+    /* nothing got worse — show the best improvement elsewhere, if there is one */
+    let best = null;
+    for (const n of this.nodes) {
+      if (inGroup.has(n.id)) continue;
+      const dc = rec.after.nodeCong[n.id] - rec.before.nodeCong[n.id];
+      if (dc <= -CONG_SIG && (!best || dc < best.dc)) best = { n, dc };
+    }
+    if (best) this.flash(best.n.x, best.n.y, `\u2212${Math.abs(best.dc).toFixed(0)} CONG`, 'good');
+  }
+
+  /* Post-run scoring, recomputed on a throttle so the console can display a
+     live grade from the same formula that produces the final report. */
+  liveReport() {
+    if (this._live && this.time - this._liveAt < 0.6) return this._live;
+    this._liveAt = this.time;
+    this._live = this.report();
+    return this._live;
   }
 
   adjustGreen(nodeId, axis, delta) {
@@ -1482,7 +1569,7 @@ class Simulation {
       if (!this.spend(cost)) return { ok: false, msg: 'INSUFFICIENT BUDGET' };
       this.setLinkClosed(link.a, true, 'ENGINEER CLOSURE');
       const detail = `${link.name} · segment removed from network`;
-      this.recordIntervention('Road closure', detail, cost, { roadName: link.name });
+      this.recordIntervention('Road closure', detail, cost, { roadName: link.name, closed: true });
       this.log('crit', 'CLOSURE', `${detail}. Traffic redistributing onto remaining corridors.`);
       return { ok: true, cost, msg: detail };
     }
@@ -1591,6 +1678,7 @@ class Simulation {
     this.updateMetrics(dt);
     this.clearExpired();
     this.settleInterventions();
+    if (this.flashes.length) this.flashes = this.flashes.filter(f => this.time - f.born < f.life);
 
     this.routingTimer += dt;
     if (this.routingTimer > 4) { this.routingTimer = 0; this.rebuildRouting(); }
@@ -1750,7 +1838,12 @@ class Simulation {
         const b = (rec.before.roadSat[targetRoad] || 0) * 100;
         const a = (rec.after.roadSat[targetRoad] || 0) * 100;
         const d = a - b;
-        if (d <= -SAT_SIG) lines.push(`reduced saturation on <b>${targetRoad}</b> from ${b.toFixed(0)}% to <span class="pos">${a.toFixed(0)}%</span>`);
+        if (spec.closed) {
+          /* A closed link reads as zero saturation by definition. Reporting that
+             as an achievement would say nothing — a closure is only interesting
+             for where its traffic ended up, which is the line below. */
+          lines.push(`took <b>${targetRoad}</b> out of service entirely`);
+        } else if (d <= -SAT_SIG) lines.push(`reduced saturation on <b>${targetRoad}</b> from ${b.toFixed(0)}% to <span class="pos">${a.toFixed(0)}%</span>`);
         else if (d >= SAT_SIG) lines.push(`raised saturation on <b>${targetRoad}</b> by <span class="neg">${d.toFixed(0)} points</span>`);
         else lines.push(`left <b>${targetRoad}</b> effectively unchanged at ${a.toFixed(0)}% saturation`);
 
@@ -1861,39 +1954,166 @@ function buildTerrain() {
   return { buildings, park, trees };
 }
 
+/* The HUD floats over the map, so the camera fits the network into the region
+   that is *not* covered by chrome. These numbers mirror the CSS custom
+   properties; keeping them here means the fit stays correct at any size. */
+const HUD = {
+  gutter: 10, topbar: 54, metrics: 64, panel: 320, strip: 44, ticker: 30,
+  get left() { return this.gutter + 6; },
+  get right() { return this.gutter + this.panel + 24; },
+  get top() { return this.gutter + this.topbar + 8 + this.metrics + 18; },
+  get bottom() { return this.gutter + this.strip + 8 + this.ticker + 10; }
+};
+
 class Renderer {
   constructor(canvas, sim) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
     this.sim = sim;
     this.dpr = Math.min(window.devicePixelRatio || 1, 2);
-    this.scale = 1; this.ox = 0; this.oy = 0;
+    /* `cam` is what is drawn; `camT` is where it is heading. Easing between the
+       two is what makes a focus move feel like a camera rather than a jump. */
+    this.cam = { scale: 1, ox: 0, oy: 0 };
+    this.camT = { scale: 1, ox: 0, oy: 0 };
+    this.camRate = 16;
     this.hover = null;
     this.selected = null;
     this.t = 0;
     this.terrain = buildTerrain();
     this._laneCache = new Map();
-    this.resize();
+    this._bounds = null;
+    this.resize(true);
   }
-  setSim(sim) { this.sim = sim; }
+  setSim(sim) { this.sim = sim; this._bounds = null; }
 
-  resize() {
+  resize(refit) {
     const rect = this.canvas.getBoundingClientRect();
     const w = Math.max(320, rect.width), h = Math.max(240, rect.height);
     this.canvas.width = Math.floor(w * this.dpr);
     this.canvas.height = Math.floor(h * this.dpr);
     this.cw = w; this.ch = h;
-    const pad = 30;
-    this.scale = Math.min((w - pad * 2) / WORLD.w, (h - pad * 2) / WORLD.h);
-    this.ox = (w - WORLD.w * this.scale) / 2 - WORLD.x * this.scale;
-    this.oy = (h - WORLD.h * this.scale) / 2 - WORLD.y * this.scale;
+    this.minScale = null;
+    if (refit) this.fit(true); else this.fit(false);
   }
 
+  /* ---------- camera ---------- */
+
+  /* Footprint of the *network* rather than of the world box. The city fabric
+     deliberately runs off-frame, so fitting the roads makes the network fill
+     the view instead of floating inside a margin of empty ground. */
+  networkBounds() {
+    if (this._bounds && !this._boundsStale) return this._bounds;
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const rd of this.sim.roads) {
+      const pad = this.roadWidth(rd) / 2 + rd.link.halfOffset;
+      for (const p of rd.pts) {
+        if (p.x - pad < x0) x0 = p.x - pad;
+        if (p.y - pad < y0) y0 = p.y - pad;
+        if (p.x + pad > x1) x1 = p.x + pad;
+        if (p.y + pad > y1) y1 = p.y + pad;
+      }
+    }
+    this._bounds = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+    this._boundsStale = false;
+    return this._bounds;
+  }
+
+  /* The rectangle of the viewport actually available to the map. */
+  freeRect() {
+    const l = Math.min(HUD.left, this.cw * 0.2);
+    const r = Math.min(HUD.right, this.cw * 0.34);
+    const t = Math.min(HUD.top, this.ch * 0.3);
+    const b = Math.min(HUD.bottom, this.ch * 0.26);
+    return { x: l, y: t, w: Math.max(160, this.cw - l - r), h: Math.max(140, this.ch - t - b) };
+  }
+
+  /* Fit the whole network into the free rectangle. `immediate` skips the easing
+     so the opening frame is already framed rather than flying in. */
+  fit(immediate) {
+    if (!this.sim || !this.sim.roads.length) return;
+    const b = this.networkBounds();
+    const fr = this.freeRect();
+    const pad = Math.min(26, fr.w * 0.05);
+    const s = Math.min((fr.w - pad * 2) / b.w, (fr.h - pad * 2) / b.h);
+    const cx = b.x + b.w / 2, cy = b.y + b.h / 2;
+    const ox = (fr.x + fr.w / 2) - cx * s;
+    const oy = (fr.y + fr.h / 2) - cy * s;
+    this.camRate = immediate ? 1e6 : 7;
+    this.setCam({ scale: s, ox, oy }, immediate);
+    if (!this.minScale) { this.minScale = s * 0.66; this.maxScale = s * 3.4; }
+    else { this.minScale = s * 0.66; this.maxScale = s * 3.4; }
+  }
+
+  setCam(c, immediate) {
+    this.camT.scale = c.scale; this.camT.ox = c.ox; this.camT.oy = c.oy;
+    if (immediate) { this.cam.scale = c.scale; this.cam.ox = c.ox; this.cam.oy = c.oy; }
+  }
+
+  viewCentre() {
+    return {
+      x: (this.cw / 2 - this.cam.ox) / this.cam.scale,
+      y: (this.ch / 2 - this.cam.oy) / this.cam.scale
+    };
+  }
+
+  zoomAt(mx, my, factor, immediate) {
+    const w = this.toWorld(mx, my);
+    const ns = clamp(this.camT.scale * factor, this.minScale || 0.3, this.maxScale || 4);
+    const ox = mx - w.x * ns, oy = my - w.y * ns;
+    this.camRate = immediate ? 1e6 : 20;
+    this.setCam({ scale: ns, ox, oy }, immediate);
+  }
+
+  panBy(dx, dy) {
+    this.camRate = 1e6;
+    this.setCam({ scale: this.camT.scale, ox: this.camT.ox + dx, oy: this.camT.oy + dy }, true);
+  }
+
+  /* Centre a world point, optionally at a specific zoom (clamped). */
+  focusOn(x, y, wantScale) {
+    const fr = this.freeRect();
+    const s = clamp(wantScale || this.camT.scale, this.minScale || 0.3, this.maxScale || 4);
+    this.camRate = 7;
+    this.setCam({
+      scale: s,
+      ox: (fr.x + fr.w / 2) - x * s,
+      oy: (fr.y + fr.h / 2) - y * s
+    }, false);
+  }
+
+  zoomBy(factor) {
+    this.zoomAt(this.cw / 2, this.ch / 2, factor, false);
+  }
+
+  /* Pan just enough to bring a world point inside the visible region, leaving
+     the zoom alone. Used for keyboard stepping through the network. */
+  ensureVisible(x, y) {
+    const fr = this.freeRect();
+    const p = this.toScreen(x, y);
+    const m = 46;
+    if (p.x > fr.x + m && p.x < fr.x + fr.w - m && p.y > fr.y + m && p.y < fr.y + fr.h - m) return;
+    this.focusOn(x, y, this.camT.scale);
+  }
+
+  tick(dt) {
+    const k = 1 - Math.exp(-dt * this.camRate);
+    const c = this.cam, t = this.camT;
+    if (Math.abs(t.scale - c.scale) < 1e-4 && Math.abs(t.ox - c.ox) < 0.05 && Math.abs(t.oy - c.oy) < 0.05) {
+      c.scale = t.scale; c.ox = t.ox; c.oy = t.oy;
+    } else {
+      c.scale += (t.scale - c.scale) * k;
+      c.ox += (t.ox - c.ox) * k;
+      c.oy += (t.oy - c.oy) * k;
+    }
+  }
+
+  get scaleView() { return this.cam.scale; }
+
   toWorld(mx, my) {
-    return { x: (mx - this.ox) / this.scale, y: (my - this.oy) / this.scale };
+    return { x: (mx - this.cam.ox) / this.cam.scale, y: (my - this.cam.oy) / this.cam.scale };
   }
   toScreen(x, y) {
-    return { x: x * this.scale + this.ox, y: y * this.scale + this.oy };
+    return { x: x * this.cam.scale + this.cam.ox, y: y * this.cam.scale + this.cam.oy };
   }
 
   /* ---------- geometry helpers ---------- */
@@ -1931,13 +2151,15 @@ class Renderer {
   draw(dt) {
     const ctx = this.ctx, sim = this.sim;
     this.t += dt;
+    this.tick(Math.min(dt, 0.05));
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
     ctx.fillStyle = '#06080b';
     ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
     if (!sim) return;
 
-    ctx.setTransform(this.dpr * this.scale, 0, 0, this.dpr * this.scale, this.dpr * this.ox, this.dpr * this.oy);
+    const c = this.cam;
+    ctx.setTransform(this.dpr * c.scale, 0, 0, this.dpr * c.scale, this.dpr * c.ox, this.dpr * c.oy);
     this.drawDistricts(ctx);
     this.drawBlocks(ctx);
     this.drawPark(ctx);
@@ -1958,12 +2180,13 @@ class Renderer {
        at any fitted scale */
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     this.drawLabels(ctx);
+    this.drawFlashes(ctx);
   }
 
   drawDistricts(ctx) {
     ctx.save();
     const x0 = WORLD.x + 12, w = WORLD.w - 24;
-    const dpr = 1 / Math.max(0.35, this.scale);      // keeps hairlines hairlines
+    const dpr = 1 / Math.max(0.35, this.cam.scale);      // keeps hairlines hairlines
     for (const d of DISTRICT_BANDS) {
       ctx.fillStyle = 'rgba(255,255,255,0.013)';
       ctx.fillRect(x0, d.y0, w, d.y1 - d.y0);
@@ -2386,72 +2609,178 @@ class Renderer {
   drawSelection(ctx) {
     ctx.save();
     ctx.lineCap = 'round';
+    const hair = 1 / this.cam.scale;          // one device pixel, in world units
+
     if (this.hover && this.hover.kind === 'road') {
       const rd = this.roadFor(this.hover);
       if (rd) {
         this.pathOf(ctx, rd.pts);
-        ctx.strokeStyle = 'rgba(255,255,255,0.30)';
-        ctx.lineWidth = this.roadWidth(rd) + 3;
+        ctx.strokeStyle = 'rgba(255,255,255,0.34)';
+        ctx.lineWidth = this.roadWidth(rd) + 3.5 * hair;
         ctx.stroke();
       }
     }
     if (this.selected && this.selected.kind === 'road') {
       const rd = this.roadFor(this.selected);
       if (rd) {
+        const pulse = 0.5 + 0.5 * Math.sin(this.t * 2.6);
         this.pathOf(ctx, rd.pts);
-        ctx.strokeStyle = 'rgba(63,191,174,0.5)';
-        ctx.lineWidth = this.roadWidth(rd) + 5;
+        ctx.strokeStyle = `rgba(63,191,174,${0.42 + pulse * 0.22})`;
+        ctx.lineWidth = this.roadWidth(rd) + 5 * hair;
         ctx.stroke();
       }
+    }
+
+    /* Hover ring on junctions, so it is obvious what a click will select. */
+    if (this.hover && this.hover.kind === 'node') {
+      const n = this.sim.city.nodeById[this.hover.id];
+      if (n) {
+        const e = this.junctionExtent(n) + 6 * hair;
+        ctx.strokeStyle = 'rgba(255,255,255,0.45)';
+        ctx.lineWidth = 1.4 * hair;
+        ctx.setLineDash([5 * hair, 4 * hair]);
+        ctx.beginPath(); ctx.arc(n.x, n.y, e, 0, Math.PI * 2); ctx.stroke();
+        ctx.setLineDash([]);
+      }
+    }
+    ctx.restore();
+  }
+
+  /* Measured consequence badges. When an intervention settles, the junctions
+     and links that actually moved get a short-lived label showing by how much —
+     so the second-order effect is visible on the network itself, not only in the
+     end-of-run report. */
+  drawFlashes(ctx) {
+    const sim = this.sim;
+    if (!sim.flashes || !sim.flashes.length) return;
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    for (const f of sim.flashes) {
+      const age = sim.time - f.born;
+      if (age < 0 || age > f.life) continue;
+      const u = age / f.life;
+      const rise = 30 * Math.min(1, u * 2.6);
+      const alpha = u < 0.1 ? u / 0.1 : u > 0.72 ? Math.max(0, 1 - (u - 0.72) / 0.28) : 1;
+      const p = this.toScreen(f.x, f.y);
+      if (p.x < -200 || p.x > this.cw + 200 || p.y < -120 || p.y > this.ch + 120) continue;
+      /* Clears the junction's own name and queue badge, which occupy the first
+         ~45px above the node — the badge must not fight the labels it explains. */
+      const y = p.y - 46 - rise;
+      ctx.font = '600 10px ui-monospace, monospace';
+      const tw = ctx.measureText(f.text).width;
+      const h = 17, padX = 7;
+      const by = y - h / 2, bx = p.x - tw / 2 - padX, bw = tw + padX * 2;
+      ctx.globalAlpha = alpha;
+      ctx.beginPath();
+      if (ctx.roundRect) ctx.roundRect(bx, by, bw, h, 4); else ctx.rect(bx, by, bw, h);
+      ctx.fillStyle = 'rgba(8,11,14,0.94)';
+      ctx.fill();
+      ctx.strokeStyle = f.col;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.globalAlpha = alpha * 0.4;
+      ctx.beginPath(); ctx.moveTo(p.x, by + h); ctx.lineTo(p.x, p.y - 5); ctx.stroke();
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = f.col;
+      ctx.fillText(f.text, p.x, y + 0.5);
+      ctx.globalAlpha = 1;
     }
     ctx.restore();
   }
 
   /* All text is laid out in device space: constant on-screen size, sharp at any
-     fitted scale, and never distorted by the world transform. */
+     fitted scale, and never distorted by the world transform. Labels are kept
+     deliberately sparse at low zoom so the network reads before the names do. */
   drawLabels(ctx) {
     const sim = this.sim;
+    const s = this.cam.scale;
+    /* Named junctions appear when they are far enough apart on screen to fit a
+       name between them. Keying this off the *layout* rather than an absolute
+       zoom means the label density adapts to the window size as well — a fixed
+       threshold that suited one monitor blanked every name on a smaller one. */
+    const nb = this.networkBounds();
+    const gap = Math.min((nb.w * s) / 3, (nb.h * s) / 2);
+    const roomy = gap > 110;
     ctx.save();
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
 
     for (const d of DISTRICT_BANDS) {
-      const s = this.toScreen(WORLD.x + 16, d.y0 + 15);
+      const p = this.toScreen(WORLD.x + 16, d.y0 + 15);
       ctx.textAlign = 'left';
       ctx.font = '600 9px ui-monospace, monospace';
-      ctx.fillStyle = 'rgba(255,255,255,0.145)';
-      ctx.fillText(d.label, s.x, s.y);
+      ctx.fillStyle = `rgba(255,255,255,${roomy ? 0.15 : 0.10})`;
+      ctx.fillText(d.label, p.x, p.y);
     }
+
+    const selNode = this.selected && this.selected.kind === 'node' ? this.selected.id : null;
+    const hovNode = this.hover && this.hover.kind === 'node' ? this.hover.id : null;
 
     ctx.textAlign = 'center';
     for (const n of sim.nodes) {
-      const s = this.toScreen(n.x, n.y);
+      const p = this.toScreen(n.x, n.y);
+      const hot = n.id === selNode || n.id === hovNode;
+      if (!roomy && !hot) continue;                 // declutter when zoomed out
       const above = n.y > 300;
-      const ly = s.y + (above ? -26 : 27);
-      ctx.font = '500 10px -apple-system, "Segoe UI", Roboto, sans-serif';
-      ctx.fillStyle = 'rgba(214,224,232,0.7)';
-      ctx.fillText(n.name.toUpperCase(), s.x, ly);
-      if (this.selected && this.selected.kind === 'node' && this.selected.id === n.id) {
+      const ly = p.y + (above ? -27 : 28);
+      ctx.font = hot ? '600 10.5px -apple-system, "Segoe UI", Roboto, sans-serif'
+                     : '500 10px -apple-system, "Segoe UI", Roboto, sans-serif';
+      ctx.fillStyle = hot ? 'rgba(236,244,250,0.96)' : 'rgba(214,224,232,0.62)';
+      ctx.fillText(n.name.toUpperCase(), p.x, ly);
+      if (hot) {
         ctx.font = '500 9px ui-monospace, monospace';
         ctx.fillStyle = 'rgba(63,191,174,0.95)';
-        /* badge sits one full text-height clear of the name; 13px collided */
-        ctx.fillText(`${Math.round(n.queue)} QUEUED · ${n.waitEma.toFixed(0)}s WAIT`, s.x, ly + (above ? -15 : 15));
+        ctx.fillText(`${Math.round(n.queue)} QUEUED \u00b7 ${n.waitEma.toFixed(0)}s WAIT`, p.x, ly + (above ? -15 : 15));
+      }
+    }
+
+    /* Name the road under the cursor or in the detail panel, so a segment can be
+       identified without leaving the map. */
+    const rt = (this.hover && this.hover.kind === 'road') ? this.hover
+             : (this.selected && this.selected.kind === 'road') ? this.selected : null;
+    if (rt) {
+      const rd = this.roadFor(rt);
+      if (rd) {
+        const mid = rd.posAt(rd.len * 0.5, { x: 0, y: 0, angle: 0 });
+        const p = this.toScreen(mid.x, mid.y);
+        const txt = `${rd.name.toUpperCase()}  \u00b7  ${Math.round(rd.saturation * 100)}% FULL`;
+        ctx.font = '600 9.5px ui-monospace, monospace';
+        const tw = ctx.measureText(txt).width;
+        const h = 18, padX = 8;
+        ctx.beginPath();
+        if (ctx.roundRect) ctx.roundRect(p.x - tw / 2 - padX, p.y - 12 - h, tw + padX * 2, h, 4);
+        else ctx.rect(p.x - tw / 2 - padX, p.y - 12 - h, tw + padX * 2, h);
+        ctx.fillStyle = 'rgba(8,11,14,0.9)';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(63,191,174,0.5)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.fillStyle = 'rgba(180,232,220,0.96)';
+        ctx.fillText(txt, p.x, p.y - 12 - h / 2 + 0.5);
       }
     }
     ctx.restore();
   }
 
+  /* Pick targets are sized in *device* pixels, so a junction stays as easy to
+     hit at 3x zoom as it is when the network is fitted. */
   hitTest(mx, my) {
     const w = this.toWorld(mx, my);
+    const s = this.cam.scale || 1;
+    const nodeR = Math.max(15, 24 / s);
     for (const n of this.sim.nodes) {
-      if (Math.hypot(n.x - w.x, n.y - w.y) < 20) return { kind: 'node', id: n.id };
+      if (Math.hypot(n.x - w.x, n.y - w.y) < nodeR) return { kind: 'node', id: n.id };
     }
-    let best = null, bestD = 13;
+    let best = null, bestD = Infinity;
     for (const rd of this.sim.roads) {
       const d = this.distToRoad(rd, w);
-      if (d < bestD) { bestD = d; best = { kind: 'road', name: rd.name, rev: rd.rev }; }
+      if (d < bestD) { bestD = d; best = rd; }
     }
-    return best;
+    if (best && bestD <= this.roadWidth(best) / 2 + 8 / s) {
+      return { kind: 'road', name: best.name, rev: best.rev };
+    }
+    return null;
   }
 
   distToRoad(rd, p) {
@@ -2486,6 +2815,9 @@ class UI {
     this.lastCardId = 0;
     this.lastRunSpeed = 1;
     this.howReturn = 'scrMenu';
+    this.drag = null;
+    this.feedOpen = false;
+    this.tlFor = null;
 
     this.buildScenarioCards();
     this.bindEvents();
@@ -2574,15 +2906,22 @@ class UI {
     });
 
     window.addEventListener('keydown', e => this.onKey(e));
+    this.bindCamera();
 
-    const canvas = this.$('map');
-    canvas.addEventListener('mousemove', e => this.onHover(e));
-    canvas.addEventListener('mouseleave', () => { this.renderer.hover = null; this.$('tooltip').classList.add('hidden'); });
-    canvas.addEventListener('click', e => this.onClick(e));
+    window.addEventListener('resize', () => { if (this.renderer) this.renderer.resize(false); });
 
-    window.addEventListener('resize', () => { if (this.renderer) this.renderer.resize(); });
+    /* event ticker */
+    this.$('feedToggle').addEventListener('click', () => {
+      this.feedOpen = !this.feedOpen;
+      this.$('feed').classList.toggle('open', this.feedOpen);
+    });
 
-    /* panels */
+    /* camera buttons */
+    this.$('btnZoomIn').addEventListener('click', () => this.renderer && this.renderer.zoomBy(1.25));
+    this.$('btnZoomOut').addEventListener('click', () => this.renderer && this.renderer.zoomBy(1 / 1.25));
+    this.$('btnZoomFit').addEventListener('click', () => this.renderer && this.renderer.fit(false));
+
+    /* panel controls */
     this.$('btnNsMinus').addEventListener('click', () => this.doGreen('NS', -4));
     this.$('btnNsPlus').addEventListener('click', () => this.doGreen('NS', 4));
     this.$('btnEwMinus').addEventListener('click', () => this.doGreen('EW', -4));
@@ -2596,6 +2935,69 @@ class UI {
     this.$('btnCorridorRoad').addEventListener('click', () => this.doCorridor());
     this.$('btnCorridor').addEventListener('click', () => this.doCorridor());
     this.$('btnRedirect').addEventListener('click', () => this.doRedirect());
+    this.$('btnCloseNode').addEventListener('click', () => this.selectAsset(null));
+    this.$('btnCloseRoadPanel').addEventListener('click', () => this.selectAsset(null));
+  }
+
+  /* Map navigation. The camera is the only thing these touch — driving the view
+     around must never perturb the simulation, or cause and effect stop being
+     attributable to the player's engineering decisions. */
+  bindCamera() {
+    const stage = this.$('stage');
+    const canvas = this.$('map');
+
+    canvas.addEventListener('wheel', e => {
+      if (!this.renderer) return;
+      e.preventDefault();
+      const rect = canvas.getBoundingClientRect();
+      this.renderer.zoomAt(e.clientX - rect.left, e.clientY - rect.top, e.deltaY < 0 ? 1.16 : 1 / 1.16, false);
+    }, { passive: false });
+
+    canvas.addEventListener('mousedown', e => {
+      if (!this.renderer || e.button !== 0) return;
+      this.drag = { x: e.clientX, y: e.clientY, moved: 0 };
+    });
+
+    window.addEventListener('mousemove', e => {
+      if (!this.drag || !this.renderer) return;
+      const dx = e.clientX - this.drag.x, dy = e.clientY - this.drag.y;
+      this.drag.moved += Math.abs(dx) + Math.abs(dy);
+      this.drag.x = e.clientX; this.drag.y = e.clientY;
+      if (this.drag.moved > 4) {
+        stage.classList.add('dragging');
+        this.renderer.panBy(dx, dy);
+      }
+    });
+
+    /* Canvas mouseup precedes the window handler below, so the drag distance is
+       still readable here — which is how a pan is told apart from a click. */
+    canvas.addEventListener('mouseup', e => {
+      if (!this.renderer || !this.sim || e.button !== 0) return;
+      if (this.drag && this.drag.moved > 4) return;
+      this.onClick(e);
+    });
+
+    window.addEventListener('mouseup', () => {
+      this.drag = null;
+      stage.classList.remove('dragging');
+    });
+
+    canvas.addEventListener('dblclick', e => {
+      if (!this.renderer || !this.sim) return;
+      const rect = canvas.getBoundingClientRect();
+      const hit = this.renderer.hitTest(e.clientX - rect.left, e.clientY - rect.top);
+      if (hit && hit.kind === 'node') {
+        this.selectAsset(hit);
+        const n = this.sim.city.nodeById[hit.id];
+        this.renderer.focusOn(n.x, n.y, Math.max(this.renderer.camT.scale, (this.renderer.minScale || 1) * 1.9));
+      }
+    });
+
+    canvas.addEventListener('mouseleave', () => {
+      if (this.renderer) this.renderer.hover = null;
+      this.$('tooltip').classList.add('hidden');
+    });
+    canvas.addEventListener('mousemove', e => this.onHover(e));
   }
 
   openHow(from) {
@@ -2630,6 +3032,7 @@ class UI {
     else if (e.key === '2') this.setSpeed(2);
     else if (e.key === '4') this.setSpeed(4);
     else if (e.key === 'Escape') this.selectAsset(null);
+    else if (e.key === 'f' || e.key === 'F') { if (this.renderer) this.renderer.fit(false); }
     else if (e.key === 'ArrowRight') this.cycleNode(1);
     else if (e.key === 'ArrowLeft') this.cycleNode(-1);
   }
@@ -2640,6 +3043,10 @@ class UI {
     const i = cur == null ? (dir > 0 ? -1 : 0) : ids.indexOf(cur);
     const next = ids[((i + dir) % ids.length + ids.length) % ids.length];
     this.selectAsset({ kind: 'node', id: next });
+    const n = this.sim.city.nodeById[next];
+    /* Only move the camera if the junction is actually off-view, so stepping
+       through the network with the arrow keys does not lurch about. */
+    if (this.renderer) this.renderer.ensureVisible(n.x, n.y);
   }
 
   /* ---------- lifecycle ---------- */
@@ -2655,18 +3062,51 @@ class UI {
       }
     } else {
       this.renderer.setSim(this.sim);
-      this.renderer.resize();
+      this.renderer.resize(true);
     }
     this.selected = null;
     this.renderer.selected = null;
     this.renderer.hover = null;
     this.lastCardId = 0;
+    this.tlFor = null;
+    this.feedOpen = false;
+    this.$('feed').classList.remove('open');
+    this.$('toastLayer').innerHTML = '';
     this.clearFeed();
     this.renderFeed();
     this.showScreen(null);
     this.selectAsset(null);
     this.setSpeed(1);
+    this.updateDashboard();
     if (!this.raf) { this.lastFrame = performance.now(); this.loop(this.lastFrame); }
+  }
+
+  /* ---------- day timeline ---------- */
+
+  /* Drawn once per run. Phase bands give the shape of demand and the ticks show
+     what is scheduled, so the player can see a surge coming and act before it
+     lands — which is most of what separates a game from a dashboard. */
+  buildTimeline() {
+    const sim = this.sim, sc = sim.scenario, D = sim.duration;
+    const PCOL = ['rgba(255,255,255,.30)', 'rgba(255,255,255,.16)', 'rgba(215,162,63,.30)', 'rgba(72,201,216,.24)'];
+    let prev = 0;
+    this.$('tlPhases').innerHTML = sc.phases.map((p, i) => {
+      const left = (prev / D) * 100;
+      const w = ((p.until - prev) / D) * 100;
+      prev = p.until;
+      return `<i style="left:${left}%;width:${w}%;background:${PCOL[i % PCOL.length]}" title="${p.name} — demand ${p.demand}"></i>`;
+    }).join('');
+
+    const COL = {
+      accident: '#d05a4e', incident: '#d05a4e', outage: '#d7a23f', surge: '#d7a23f',
+      rain: '#6f93b5', transit: '#c08d3a', ev: '#48c9d8', spike: '#d7a23f'
+    };
+    this.$('tlEvents').innerHTML = sim.events.map(e => {
+      const left = clamp01(e.t / D) * 100;
+      const col = COL[e.kind] || '#8a93a0';
+      return `<i class="tl-ev" style="left:${left}%;background:${col}" title="${e.title}"></i>`;
+    }).join('');
+    this.tlFor = sc.id;
   }
 
   setSpeed(s) {
@@ -2766,14 +3206,20 @@ class UI {
   selectAsset(hit) {
     this.selected = hit;
     if (this.renderer) this.renderer.selected = hit;
-    const empty = this.$('detailEmpty');
+    const sit = this.$('sitCard');
     const nd = this.$('detailNode');
     const rdd = this.$('detailRoad');
-    empty.classList.toggle('hidden', !!hit);
+    sit.classList.toggle('hidden', !!hit);
     nd.classList.toggle('hidden', !(hit && hit.kind === 'node'));
     rdd.classList.toggle('hidden', !(hit && hit.kind === 'road'));
     if (hit && hit.kind === 'node') this.fillNode(hit.id);
     if (hit && hit.kind === 'road') this.fillRoad(hit);
+  }
+
+  /* Traffic-light colouring for a readout, so a number carries its own warning. */
+  tone(id, cls) {
+    const el = this.$(id);
+    if (el) el.className = 'vital' + (cls ? ' ' + cls : '');
   }
 
   /* ---------- panel rendering ---------- */
@@ -2781,7 +3227,7 @@ class UI {
   fillNode(id) {
     const n = this.sim.city.nodeById[id];
     this.$('ndName').textContent = n.name;
-    this.$('ndDistrict').textContent = n.district + (n.gate ? ' · ' + n.gate.code : '');
+    this.$('ndDistrict').textContent = n.district;
     this.$('btnBusPriority').classList.toggle('on', n.busPriority);
   }
 
@@ -2791,9 +3237,18 @@ class UI {
     this.$('rdName').textContent = rd.name;
     this.$('rdClass').textContent = rd.cls;
     this.$('rdFrom').textContent = rd.from.name;
+    this.$('rdTo').textContent = rd.to.name;
     this.$('laneAName').textContent = rd.link.a.from.name + ' → ' + rd.link.a.to.name;
     this.$('laneBName').textContent = rd.link.b.from.name + ' → ' + rd.link.b.to.name;
     this.$('rdLanes').textContent = `${rd.link.a.lanes} / ${rd.link.b.lanes}`;
+  }
+
+  gradeOf(c) {
+    if (c >= 82) return 'A';
+    if (c >= 72) return 'B';
+    if (c >= 62) return 'C';
+    if (c >= 50) return 'D';
+    return 'E';
   }
 
   updateDashboard() {
@@ -2804,9 +3259,27 @@ class UI {
     this.$('simClock').textContent = formatClock(sim.scenario.startClock, sim.time, CFG.clockRate);
     this.$('feedClock').textContent = this.$('simClock').textContent;
     this.$('simPhase').textContent = sim.currentPhase().name;
-    const prog = clamp01(sim.time / sim.duration);
-    this.$('dayFill').style.width = (prog * 100) + '%';
-    this.$('dayPct').textContent = Math.round(prog * 100) + '%';
+
+    /* Live grade. Deliberately the *same* composite the post-run report
+       produces, so the letter on the bar is never a different formula from the
+       one the analysis closes on. */
+    const R = sim.liveReport();
+    const letter = this.gradeOf(R.composite);
+    const col = letter === 'A' ? 'var(--good)' : letter === 'B' ? '#7fd8c4'
+      : letter === 'C' ? 'var(--warn)' : 'var(--bad)';
+    const gl = this.$('gradeLetter');
+    if (gl.textContent !== letter) gl.textContent = letter;
+    gl.style.color = col;
+    const gf = this.$('gradeFill');
+    gf.style.width = clamp(R.composite, 0, 100) + '%';
+    gf.style.background = col;
+
+    /* conditions */
+    const condBox = document.querySelector('.clock-cond');
+    if (condBox) condBox.classList.toggle('wet', sim.weather.speed < 1);
+    this.$('simCond').textContent = sim.weather.label;
+
+    this.updateTimeline();
 
     /* metrics */
     const m = sim.metrics;
@@ -2858,25 +3331,32 @@ class UI {
     document.querySelector('.metric[data-key="congestion"]').classList.toggle('alert', m.congestion > 78);
     document.querySelector('.metric[data-key="stability"]').classList.toggle('alert', m.stability < 42);
 
-    /* system readout */
+    /* situation card */
     this.$('demandVal').textContent = (sim.demandRate || 0).toFixed(1);
-    this.$('condVal').textContent = sim.weather.label;
     this.$('activeVal').textContent = sim.totalCars;
+    this.$('servedVal').textContent = Math.round(sim.servedRatio * 100);
+    this.$('sitPhase').textContent = sim.currentPhase().name;
     this.$('sysId').textContent = 'GRD-' + sim.scenario.num;
+    this.renderLiveScores(R);
 
     const redirectBtn = this.$('btnRedirect');
     redirectBtn.classList.toggle('on', sim.redirection);
     this.$('redirectSub').textContent = sim.redirection
-      ? 'ENABLED — ROUTING WEIGHTED BY OBSERVED SATURATION'
-      : 'DISABLED — ROUTING USES FREE-FLOW COST';
+      ? 'ON — DRIVERS AVOID SATURATED LINKS'
+      : 'OFF — DRIVERS USE FREE-FLOW COST';
 
     const corridorBtn = this.$('btnCorridor');
     const ev = sim.activeEv;
-    corridorBtn.classList.toggle('on', sim.corridorActive());
-    if (sim.corridorActive()) this.$('corridorSub').textContent = 'ACTIVE — CROSS MOVEMENTS HELD';
-    else if (ev) this.$('corridorSub').textContent = 'VEHICLE EN ROUTE — AUTHORISE';
-    else this.$('corridorSub').textContent = 'NO ACTIVE INCIDENT';
-    corridorBtn.classList.toggle('on', !!ev && !sim.corridorAuthorized && !sim.corridorActive());
+    if (sim.corridorActive()) {
+      corridorBtn.className = 'btn wide on urgent';
+      this.$('corridorSub').textContent = 'ACTIVE — CROSS MOVEMENTS HELD';
+    } else if (ev) {
+      corridorBtn.className = 'btn wide on urgent';
+      this.$('corridorSub').textContent = 'RESPONSE VEHICLE EN ROUTE — AUTHORISE';
+    } else {
+      corridorBtn.className = 'btn wide';
+      this.$('corridorSub').textContent = 'NO ACTIVE INCIDENT';
+    }
 
     /* selection detail */
     if (this.selected && this.selected.kind === 'node') this.updateNodePanel(this.selected.id);
@@ -2885,6 +3365,51 @@ class UI {
     this.renderCards();
     this.renderIncidents();
     this.renderFeed();
+  }
+
+  /* The same six components the post-run report breaks down, shown live. Making
+     the grading model visible during the shift is what turns the metrics into a
+     plan rather than a mystery to be discovered at the end. */
+  renderLiveScores(R) {
+    const wrap = this.$('liveScores');
+    if (!wrap) return;
+    const rows = [
+      ['TRAFFIC', R.scores.traffic],
+      ['RESILIENCE', R.scores.resilience],
+      ['RESOURCE', R.scores.resource],
+      ['PUBLIC', R.scores.publicScore],
+      ['EMERGENCY', R.scores.emergency],
+      ['STABILITY', R.scores.stability]
+    ];
+    const key = rows.map(r => Math.round(r[1])).join(',');
+    if (wrap.dataset.k === key) return;                  // rebuild only on change
+    wrap.dataset.k = key;
+    wrap.innerHTML = rows.map(r => {
+      const v = clamp(r[1], 0, 100);
+      const col = v >= 70 ? 'var(--good)' : v >= 50 ? 'var(--warn)' : 'var(--bad)';
+      return `<div class="ls-row"><span>${r[0]}</span>` +
+        `<i><b style="width:${v.toFixed(0)}%;background:${col}"></b></i>` +
+        `<em>${v.toFixed(0)}</em></div>`;
+    }).join('');
+  }
+
+  /* Day plan: phase bands, event ticks, playhead, and the next thing coming. */
+  updateTimeline() {
+    const sim = this.sim;
+    if (this.tlFor !== sim.scenario.id) this.buildTimeline();
+    this.$('tlPlay').style.left = (clamp01(sim.time / sim.duration) * 100) + '%';
+    this.$('tlNow').textContent = this.$('simClock').textContent;
+
+    const ne = this.$('nextEvent');
+    const next = sim.events.find(e => e.t > sim.time);
+    if (next) {
+      const mins = Math.max(0, Math.round((next.t - sim.time) / CFG.clockRate));
+      ne.className = 'next-event' + (next.kind === 'accident' ? ' crit' : '');
+      ne.innerHTML = `<span class="ne-t">+${mins}m</span><span class="ne-b">${next.title}</span>`;
+    } else {
+      ne.className = 'next-event idle';
+      ne.innerHTML = '<span class="ne-t">\u2014</span><span class="ne-b">No further events scheduled. Close out the shift.</span>';
+    }
   }
 
   sparkline(k) {
@@ -2925,12 +3450,14 @@ class UI {
   updateNodePanel(id) {
     const n = this.sim.city.nodeById[id];
     const $ = x => this.$(x);
-    $('ndVolume').textContent = Math.round(n.volume);
+
+    /* the three numbers that decide what you do here */
     $('ndQueue').textContent = Math.round(n.queue);
     $('ndWait').textContent = n.waitEma.toFixed(1);
-    $('ndIn').textContent = Math.round(n.inflow);
-    $('ndOut').textContent = Math.round(n.outflow);
     $('ndCong').textContent = Math.round(n.congestion);
+    this.tone('vitQueue', n.queue > 26 ? 'crit' : n.queue > 14 ? 'warn' : '');
+    this.tone('vitWait', n.waitEma > 38 ? 'crit' : n.waitEma > 22 ? 'warn' : '');
+    this.tone('vitCong', n.congestion > 80 ? 'crit' : n.congestion > 58 ? 'warn' : '');
 
     const st = $('ndStatus');
     if (n.outage) { st.textContent = 'SIGNAL LOSS'; st.className = 'status crit'; }
@@ -2942,31 +3469,34 @@ class UI {
     $('ewGreenVal').textContent = n.ewGreen;
     $('cycleVal').textContent = 'CYCLE ' + n.cycle + 's';
 
-    const greenShare = n.nsGreen + n.ewGreen;
-    $('ndSplitNs').textContent = Math.round((n.nsGreen / greenShare) * 100);
-    $('ndSplitEw').textContent = Math.round((n.ewGreen / greenShare) * 100);
-    let worstApproach = 0;
-    for (const rd of n.incoming) if (!rd.closed) worstApproach = Math.max(worstApproach, rd.saturation);
-    $('ndApproach').textContent = Math.round(worstApproach * 100);
+    const share = Math.max(1, n.nsGreen + n.ewGreen);
+    const nsPct = Math.round((n.nsGreen / share) * 100);
+    $('ndSplitNs').textContent = nsPct;
+    $('ndSplitEw').textContent = 100 - nsPct;
+    $('splitNs').style.width = nsPct + '%';
+    $('splitEw').style.width = (100 - nsPct) + '%';
+
+    let worst = 0;
+    for (const rd of n.incoming) if (!rd.closed) worst = Math.max(worst, rd.saturation);
+    $('ndApproach').textContent = Math.round(worst * 100);
+    $('ndGate').textContent = n.gate ? n.gate.code : 'INTERNAL';
+    $('ndVolume').textContent = Math.round(n.volume);
+    $('ndIn').textContent = Math.round(n.inflow);
+    $('ndOut').textContent = Math.round(n.outflow);
     $('ndMode').textContent = n.outage ? 'FLASH'
       : n.syncAxis ? 'COORD ' + n.syncAxis
       : n.preemptUntil > this.sim.time ? 'PRE-EMPT'
       : n.busPriority ? 'TRANSIT' : 'LOCAL';
 
-    const cyc = n.cycle;
-    const nsSeg = $('nsSeg'), ewSeg = $('ewSeg');
-    nsSeg.style.left = '0%';
-    nsSeg.style.width = (n.nsGreen / cyc) * 100 + '%';
-    const ewStart = (n.nsGreen + n.yellow + n.allRed) / cyc;
-    ewSeg.style.left = ewStart * 100 + '%';
-    ewSeg.style.width = (n.ewGreen / cyc) * 100 + '%';
-    $('phaseCursor').style.left = (n.localPhaseU(this.sim.time) / cyc) * 100 + '%';
-
     const p = n.phaseAt(this.sim.time);
     const names = { green: 'GREEN', yellow: 'YELLOW', allred: 'ALL-RED', flash: 'ALL-WAY FLASH' };
     $('phaseName').textContent = (p.axis ? p.axis + ' ' : '') + (names[p.state] || '');
     $('phaseCount').textContent = n.outage ? '--' : p.remaining.toFixed(1) + 's';
+
     $('btnBusPriority').classList.toggle('on', n.busPriority);
+    $('busSub').textContent = n.busPriority
+      ? 'ON — APPROACHING TRANSIT PRE-EMPTS THE CROSS PHASE'
+      : 'OFF — CARS GIVEN THE FULL CYCLE';
   }
 
   updateRoadPanel(hit) {
@@ -2980,6 +3510,13 @@ class UI {
     const v = Math.max(4, rd.effSpeed);
     $('rdTime').textContent = (rd.len / v).toFixed(1);
     $('rdFlow').textContent = Math.round(sum(rd.flow) * 60);
+    $('rdFrom').textContent = rd.from.name;
+    $('rdTo').textContent = rd.to.name;
+
+    const heavy = rd.saturation > 0.88 ? 'crit' : rd.saturation > 0.62 ? 'warn' : '';
+    this.tone('vitSat', heavy);
+    this.tone('vitLoad', heavy);
+    this.tone('vitTime', heavy);
 
     const st = $('rdStatus');
     if (rd.closed) { st.textContent = 'CLOSED'; st.className = 'status crit'; }
@@ -2995,10 +3532,19 @@ class UI {
     $('laneABar').style.width = (link.a.lanes / total) * 100 + '%';
     $('laneBBar').style.width = (link.b.lanes / total) * 100 + '%';
     $('rdLanes').textContent = `${link.a.lanes} / ${link.b.lanes}`;
-    const closeLabel = $('btnCloseRoad').querySelector('.btn-label');
-    if (closeLabel) closeLabel.textContent = link.a.closed ? 'REOPEN SEGMENT' : 'CLOSE SEGMENT';
-    $('btnLaneLeft').disabled = link.baseLanes < 2;
-    $('btnLaneRight').disabled = link.baseLanes < 2;
+
+    $('laneLeftLbl').textContent = 'GIVE A LANE TO ' + link.a.from.name.toUpperCase();
+    $('laneRightLbl').textContent = 'GIVE A LANE TO ' + link.b.from.name.toUpperCase();
+
+    const closed = !!link.a.closed;
+    $('closureLbl').textContent = closed ? 'REOPEN SEGMENT' : 'CLOSE SEGMENT';
+    $('closureSub').textContent = closed
+      ? 'RETURNS THE LINK TO THE ROUTING GRAPH'
+      : 'REMOVES THE LINK FROM THE ROUTING GRAPH';
+
+    const narrow = link.baseLanes < 2;
+    $('btnLaneLeft').disabled = narrow;
+    $('btnLaneRight').disabled = narrow;
   }
 
   /* ---------- cards / feed ---------- */
@@ -3034,6 +3580,17 @@ class UI {
         `<div class="log-row ${f.level}"><span class="lt">${f.clock}</span><span class="lv">${f.tag}</span><span class="lm">${f.msg}</span></div>`
       ).join('');
     }
+
+    /* the collapsed ticker always carries the most recent line */
+    const last = sim.feed[sim.feed.length - 1];
+    if (!last) return;
+    const tag = this.$('feedTag');
+    tag.textContent = last.tag;
+    tag.className = 'feed-tag' + (last.level === 'crit' ? ' t-crit-t' : '');
+    this.$('feedLatest').textContent = last.msg;
+    this.$('feedDot').className =
+      last.level === 'crit' ? 't-crit' : last.level === 'warn' ? 't-warn'
+      : last.level === 'good' ? 't-good' : '';
   }
 
   renderIncidents() {
@@ -3114,6 +3671,7 @@ class UI {
     $('repElapsed').textContent = `${formatClock(sim.scenario.startClock, 0, 1)} → ${formatClock(sim.scenario.startClock, sim.duration, CFG.clockRate)}`;
     $('repTrips').textContent = R.trips;
     $('repRating').textContent = R.rating;
+    $('repComposite').textContent = `${this.gradeOf(R.composite)}  \u00b7  ${R.composite.toFixed(1)}`;
 
     const cells = [
       ['AVERAGE TRAVEL TIME', R.avgTravel.toFixed(1), 's'],

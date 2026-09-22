@@ -10,7 +10,31 @@
 
 <div id="app">
 
-  <!-- ================= TOP BAR ================= -->
+  <!-- ======================= MAP (full bleed) ======================= -->
+  <div id="stage">
+    <canvas id="map"></canvas>
+    <div id="tooltip" class="hidden"></div>
+    <div id="cardLayer"></div>
+
+    <div id="viewCtrls">
+      <button class="vbtn" id="btnZoomIn" aria-label="Zoom in" title="Zoom in">&plus;</button>
+      <button class="vbtn" id="btnZoomOut" aria-label="Zoom out" title="Zoom out">&minus;</button>
+      <button class="vbtn wide" id="btnZoomFit" title="Fit the whole network (F)">FIT</button>
+    </div>
+
+    <div id="legend">
+      <span class="lg-cap">LINK LOAD</span>
+      <i class="ramp"></i>
+      <span class="lg-scale"><b>FLOWING</b><b>MODERATE</b><b>HEAVY</b><b>GRIDLOCK</b></span>
+      <span class="lg-sep"></span>
+      <span class="lg-items"><i class="sw-closed"></i>CLOSED</span>
+      <span class="lg-items"><i class="sw-inc"></i>INCIDENT</span>
+      <span class="lg-items"><i class="sw-transit"></i>BUS</span>
+      <span class="lg-items"><i class="sw-emerg"></i>CORRIDOR</span>
+    </div>
+  </div>
+
+  <!-- ======================= TOP BAR ======================= -->
   <header id="topbar">
     <div class="brand">
       <div class="brand-mark" aria-hidden="true">
@@ -23,18 +47,21 @@
     </div>
 
     <div class="clock-block">
-      <div class="clock-line">
-        <span id="simClock">07:00</span>
-        <span class="clock-phase" id="simPhase">MORNING RUSH</span>
-      </div>
-      <div class="progress"><i id="dayFill"></i></div>
-      <div class="clock-sub"><span id="dayLabel">DAY PROGRESS</span><span id="dayPct">0%</span></div>
+      <span id="simClock">07:00</span>
+      <span class="clock-phase" id="simPhase">MORNING RUSH</span>
+      <span class="clock-cond"><i id="condDot"></i><span id="simCond">CLEAR</span></span>
+    </div>
+
+    <div class="grade-block">
+      <div class="grade-cap">SYSTEM GRADE</div>
+      <b id="gradeLetter">&mdash;</b>
+      <div class="grade-meter"><i id="gradeFill"></i></div>
     </div>
 
     <div class="topbar-right">
       <div class="live"><i id="liveDot"></i><span id="liveText">SIMULATION ACTIVE</span></div>
       <div class="speed-group" role="group" aria-label="Simulation speed">
-        <button class="speed" data-speed="0">HOLD</button>
+        <button class="speed" data-speed="0" title="Hold the clock (SPACE)">HOLD</button>
         <button class="speed" data-speed="1">1&times;</button>
         <button class="speed" data-speed="2">2&times;</button>
         <button class="speed" data-speed="4">4&times;</button>
@@ -43,89 +70,105 @@
     </div>
   </header>
 
-  <!-- ================= METRICS ================= -->
+  <!-- ======================= METRICS ======================= -->
   <section id="metrics">
-    <div class="metric" data-key="flow" data-tip="Share of trip demand the network actually served, weighted by how long those journeys took. It rises when throughput improves or travel times fall — and it is deliberately weighted toward served demand, because a network that simply turns traffic away would otherwise look fast.">
-      <div class="metric-top"><span class="metric-label">Traffic Flow</span><span class="metric-delta" id="deltaFlow">&mdash;</span></div>
+    <div class="metric" data-key="flow" data-tip="Share of trip demand the network actually served, weighted by how long those journeys took. Rising when throughput improves or travel times fall.">
+      <div class="metric-top"><span class="metric-label">TRAFFIC FLOW</span><span class="metric-delta" id="deltaFlow">&mdash;</span></div>
       <div class="metric-mid">
         <div class="metric-value"><b id="valFlow">0</b><span class="unit">%</span></div>
-        <canvas class="spark" id="sparkFlow" width="192" height="52"></canvas>
+        <canvas class="spark" id="sparkFlow" width="150" height="30"></canvas>
       </div>
       <div class="metric-bar"><i id="barFlow"></i></div>
     </div>
-    <div class="metric" data-key="congestion" data-tip="Composite index: 60% how full the links are, 40% how much traffic is stacked at junctions waiting for green. Neither half alone describes the network — link loading misses junction-bound queues, and junction queues miss links saturated mid-block.">
-      <div class="metric-top"><span class="metric-label">Network Congestion</span><span class="metric-delta" id="deltaCongestion">&mdash;</span></div>
+
+    <div class="metric" data-key="congestion" data-tip="Composite index: 60% how full the links are, 40% how much traffic is stacked at junctions waiting for green. This is the metric to watch for trouble starting.">
+      <div class="metric-top"><span class="metric-label">CONGESTION</span><span class="metric-delta" id="deltaCongestion">&mdash;</span></div>
       <div class="metric-mid">
         <div class="metric-value"><b id="valCongestion">0</b><span class="unit">%</span></div>
-        <canvas class="spark" id="sparkCongestion" width="192" height="52"></canvas>
+        <canvas class="spark" id="sparkCongestion" width="150" height="30"></canvas>
       </div>
       <div class="metric-bar"><i id="barCongestion"></i></div>
     </div>
-    <div class="metric" data-key="stability" data-tip="Structural resilience. Falls as congestion spreads, as more links sit above 92% of their storage, and hard when a junction loses signal control. This is the metric that punishes fixing one place by breaking three others.">
-      <div class="metric-top"><span class="metric-label">System Stability</span><span class="metric-delta" id="deltaStability">&mdash;</span></div>
+
+    <div class="metric" data-key="stability" data-tip="Structural resilience. Falls as congestion spreads, as more links sit above 92% of their storage, and hard when a junction loses signal control. This is what punishes fixing one place by breaking three others.">
+      <div class="metric-top"><span class="metric-label">STABILITY</span><span class="metric-delta" id="deltaStability">&mdash;</span></div>
       <div class="metric-mid">
         <div class="metric-value"><b id="valStability">0</b><span class="unit">%</span></div>
-        <canvas class="spark" id="sparkStability" width="192" height="52"></canvas>
+        <canvas class="spark" id="sparkStability" width="150" height="30"></canvas>
       </div>
       <div class="metric-bar"><i id="barStability"></i></div>
     </div>
+
     <div class="metric" data-key="satisfaction" data-tip="How the journey feels to the people inside it: mean time spent waiting at signals, how many drivers gave up inside the network, and how many trip requests could not be admitted at all.">
-      <div class="metric-top"><span class="metric-label">Public Satisfaction</span><span class="metric-delta" id="deltaSatisfaction">&mdash;</span></div>
+      <div class="metric-top"><span class="metric-label">SATISFACTION</span><span class="metric-delta" id="deltaSatisfaction">&mdash;</span></div>
       <div class="metric-mid">
         <div class="metric-value"><b id="valSatisfaction">0</b><span class="unit">%</span></div>
-        <canvas class="spark" id="sparkSatisfaction" width="192" height="52"></canvas>
+        <canvas class="spark" id="sparkSatisfaction" width="150" height="30"></canvas>
       </div>
       <div class="metric-bar"><i id="barSatisfaction"></i></div>
     </div>
+
     <div class="metric" data-key="emergency" data-tip="Scored from the door-to-door time of each incident response vehicle, and on whether it arrived at all. It falls while a response is still inside the network — authorising a corridor is what buys it back.">
-      <div class="metric-top"><span class="metric-label">Emergency Response</span><span class="metric-delta" id="deltaEmergency">&mdash;</span></div>
+      <div class="metric-top"><span class="metric-label">EMERGENCY</span><span class="metric-delta" id="deltaEmergency">&mdash;</span></div>
       <div class="metric-mid">
         <div class="metric-value"><b id="valEmergency">0</b><span class="unit">%</span></div>
-        <canvas class="spark" id="sparkEmergency" width="192" height="52"></canvas>
+        <canvas class="spark" id="sparkEmergency" width="150" height="30"></canvas>
       </div>
       <div class="metric-bar"><i id="barEmergency"></i></div>
     </div>
+
     <div class="metric" data-key="budget" data-tip="Credits available for interventions. Scored as return on spend rather than frugality — the budget exists to be deployed, and an untouched budget is not a result.">
-      <div class="metric-top"><span class="metric-label">Budget Remaining</span><span class="metric-delta" id="deltaBudget">&mdash;</span></div>
+      <div class="metric-top"><span class="metric-label">BUDGET</span><span class="metric-delta" id="deltaBudget">&mdash;</span></div>
       <div class="metric-mid">
         <div class="metric-value"><b id="valBudget">100</b><span class="unit">k</span></div>
-        <canvas class="spark" id="sparkBudget" width="192" height="52"></canvas>
+        <canvas class="spark" id="sparkBudget" width="150" height="30"></canvas>
       </div>
       <div class="metric-bar"><i id="barBudget"></i></div>
     </div>
   </section>
 
-  <!-- ================= MAIN ================= -->
-  <main>
-    <div id="stage">
-      <canvas id="map"></canvas>
-      <div id="tooltip" class="hidden"></div>
-      <div id="cardLayer"></div>
-      <div id="legend">
-        <div class="lg-ramp">
-          <div class="lg-title">LINK SATURATION — SHARE OF STORAGE OCCUPIED</div>
-          <i class="ramp"></i>
-          <div class="lg-scale"><span>FLOWING</span><span>MODERATE</span><span>HEAVY</span><span>GRIDLOCKED</span></div>
-          <div class="lg-note">NETWORK SCHEMATIC — NOT TO GEOGRAPHIC SCALE</div>
-        </div>
-        <div class="lg-items">
-          <span><i class="sw-closed"></i>CLOSED SEGMENT</span>
-          <span><i class="sw-inc"></i>INCIDENT</span>
-          <span><i class="sw-transit"></i>TRANSIT PRIORITY</span>
-          <span><i class="sw-emerg"></i>EMERGENCY CORRIDOR</span>
-        </div>
-      </div>
-      <div id="stageHint">SELECT AN INTERSECTION OR ROAD SEGMENT TO INSPECT</div>
+  <!-- ======================= CONTROL PANEL ======================= -->
+  <aside id="panel">
+    <div class="panel-head">
+      <span>ENGINEERING CONTROL</span>
+      <span class="sysid" id="sysId">GRD-01</span>
     </div>
 
-    <aside id="panel">
-      <div class="panel-head">
-        <span>ENGINEERING CONTROL</span>
-        <span class="sysid" id="sysId">GRD-01</span>
-      </div>
+    <div id="panelBody">
 
-      <div id="detailEmpty" class="detail">
-        <p class="empty-copy">No asset selected. Click any intersection or road segment on the network map to open its control surface.</p>
+      <!-- ---- DEFAULT: CURRENT SITUATION ---- -->
+      <div id="sitCard" class="detail">
+        <div class="block-head first">
+          <span>CURRENT SITUATION</span>
+          <span class="mono-soft" id="sitPhase">&mdash;</span>
+        </div>
+
+        <div class="sit-row">
+          <div class="sit-cell"><span class="k">DEMAND</span><b id="demandVal">0.0</b><em>veh/s</em></div>
+          <div class="sit-cell"><span class="k">VEHICLES</span><b id="activeVal">0</b><em>in net</em></div>
+          <div class="sit-cell"><span class="k">SERVED</span><b id="servedVal">0</b><em>%</em></div>
+        </div>
+
+        <div class="block-head"><span>ACTIVE INCIDENTS</span></div>
+        <div id="incidentChips"></div>
+
+        <div class="block-head"><span>NEXT SCHEDULED</span></div>
+        <div id="nextEvent" class="next-event"></div>
+
+        <div class="block-head"><span>NETWORK-WIDE ACTIONS</span></div>
+        <button class="btn wide" id="btnCorridor" data-cost-key="corridor">
+          <span class="btn-label">AUTHORISE EMERGENCY CORRIDOR</span>
+          <span class="btn-sub" id="corridorSub">NO ACTIVE INCIDENT</span>
+        </button>
+        <button class="btn wide" id="btnRedirect" data-cost-key="redirect">
+          <span class="btn-label">DYNAMIC REROUTING</span>
+          <span class="btn-sub" id="redirectSub">OFF — DRIVERS USE FREE-FLOW COST</span>
+        </button>
+
+        <div class="block-head"><span>SCORE COMPOSITION</span><span class="mono-soft">LIVE</span></div>
+        <div class="live-scores" id="liveScores"></div>
+
+        <p class="hint">Select any junction or road on the map to open its controls. Scroll to zoom, drag to pan.</p>
       </div>
 
       <!-- ---- INTERSECTION DETAIL ---- -->
@@ -135,39 +178,37 @@
             <h3 id="ndName">&mdash;</h3>
             <span class="chip" id="ndDistrict">DISTRICT</span>
           </div>
-          <span class="status" id="ndStatus">NOMINAL</span>
+          <div class="head-right">
+            <span class="status" id="ndStatus">NOMINAL</span>
+            <button class="xbtn" id="btnCloseNode" aria-label="Close">&times;</button>
+          </div>
         </div>
 
-        <div class="stat-grid">
-          <div class="stat"><span class="k">VOLUME</span><span class="v"><b id="ndVolume">0</b> <em>veh/h</em></span></div>
-          <div class="stat"><span class="k">QUEUE</span><span class="v"><b id="ndQueue">0</b> <em>veh</em></span></div>
-          <div class="stat"><span class="k">AVG WAIT</span><span class="v"><b id="ndWait">0.0</b> <em>s</em></span></div>
-          <div class="stat"><span class="k">INFLOW</span><span class="v"><b id="ndIn">0</b> <em>veh/min</em></span></div>
-          <div class="stat"><span class="k">OUTFLOW</span><span class="v"><b id="ndOut">0</b> <em>veh/min</em></span></div>
-          <div class="stat"><span class="k">CONGESTION</span><span class="v"><b id="ndCong">0</b> <em>%</em></span></div>
+        <div class="vitals">
+          <div class="vital" id="vitQueue"><span class="k">QUEUED</span><b id="ndQueue">0</b><em>veh</em></div>
+          <div class="vital" id="vitWait"><span class="k">AVG WAIT</span><b id="ndWait">0.0</b><em>s</em></div>
+          <div class="vital" id="vitCong"><span class="k">CONGESTION</span><b id="ndCong">0</b><em>%</em></div>
         </div>
 
         <div class="block">
-          <div class="block-head"><span>SIGNAL TIMING</span><span class="mono-soft" id="cycleVal">CYCLE 48s</span></div>
-          <div class="phase-strip">
-            <i class="seg seg-ns" id="nsSeg"></i>
-            <i class="seg seg-ew" id="ewSeg"></i>
-            <span class="cursor" id="phaseCursor"></span>
-          </div>
+          <div class="block-head"><span>GREEN TIME</span><span class="mono-soft" id="cycleVal">CYCLE 48s</span></div>
+          <div class="split-bar"><i class="split-ns" id="splitNs"></i><i class="split-ew" id="splitEw"></i></div>
+          <div class="split-legend"><span class="axis-ns">NS <b id="ndSplitNs">50</b>%</span><span class="axis-ew"><b id="ndSplitEw">50</b>% EW</span></div>
+
           <div class="green-rows">
             <div class="green-row">
               <span class="axis axis-ns">NS</span>
-              <button class="step" id="btnNsMinus">&minus;</button>
+              <button class="step" id="btnNsMinus" aria-label="Less green for north-south">&minus;</button>
               <b id="nsGreenVal">20</b>
-              <button class="step" id="btnNsPlus">+</button>
-              <span class="unit-s">seconds green</span>
+              <button class="step" id="btnNsPlus" aria-label="More green for north-south">&plus;</button>
+              <span class="unit-s">s green</span>
             </div>
             <div class="green-row">
               <span class="axis axis-ew">EW</span>
-              <button class="step" id="btnEwMinus">&minus;</button>
+              <button class="step" id="btnEwMinus" aria-label="Less green for east-west">&minus;</button>
               <b id="ewGreenVal">20</b>
-              <button class="step" id="btnEwPlus">+</button>
-              <span class="unit-s">seconds green</span>
+              <button class="step" id="btnEwPlus" aria-label="More green for east-west">&plus;</button>
+              <span class="unit-s">s green</span>
             </div>
           </div>
           <div class="countdown">
@@ -178,20 +219,31 @@
 
         <div class="block">
           <div class="block-head"><span>INTERSECTION POLICY</span></div>
-          <dl class="stat-grid signal-readout">
-            <div class="stat"><span class="k">GREEN SHARE NS</span><span class="v"><b id="ndSplitNs">50</b> <em>%</em></span></div>
-            <div class="stat"><span class="k">GREEN SHARE EW</span><span class="v"><b id="ndSplitEw">50</b> <em>%</em></span></div>
-            <div class="stat"><span class="k">APPR. SATURATION</span><span class="v"><b id="ndApproach">0</b> <em>%</em></span></div>
-            <div class="stat"><span class="k">CONTROL MODE</span><span class="v"><b id="ndMode">LOCAL</b></span></div>
-          </dl>
+          <button class="btn wide" id="btnBusPriority" data-cost-key="bus">
+            <span class="btn-label">BUS PRIORITY</span>
+            <span class="btn-sub" id="busSub">OFF — CARS GIVEN FULL CYCLE</span>
+          </button>
+
+          <div class="block-head sub"><span>GREEN WAVE DIRECTION</span></div>
           <div class="btn-row">
-            <button class="btn ghost" id="btnBusPriority" data-cost-key="bus"><span>BUS PRIORITY</span></button>
-            <button class="btn ghost" id="btnSyncRow" data-cost-key="sync"><span>SYNC ROW</span></button>
-            <button class="btn ghost" id="btnSyncCol" data-cost-key="sync"><span>SYNC COL</span></button>
+            <button class="btn ghost grow" id="btnSyncCol" data-cost-key="sync"><span>ALONG NS</span></button>
+            <button class="btn ghost grow" id="btnSyncRow" data-cost-key="sync"><span>ALONG EW</span></button>
           </div>
-          <p class="hint">Bus priority pre-empts the cross phase for approaching transit. Synchronisation builds a
-            progression offset along the selected axis — the through movement gains, cross traffic loses green share.</p>
+          <p class="hint">A green wave harmonises cycle length and offsets down the selected corridor. Through traffic gains a
+            rolling green; cross traffic loses green share.</p>
         </div>
+
+        <details class="adv">
+          <summary>Signal detail</summary>
+          <dl class="stat-grid">
+            <div class="stat"><span class="k">VOLUME</span><span class="v"><b id="ndVolume">0</b> <em>veh/h</em></span></div>
+            <div class="stat"><span class="k">INFLOW</span><span class="v"><b id="ndIn">0</b> <em>veh/min</em></span></div>
+            <div class="stat"><span class="k">OUTFLOW</span><span class="v"><b id="ndOut">0</b> <em>veh/min</em></span></div>
+            <div class="stat"><span class="k">WORST APPROACH</span><span class="v"><b id="ndApproach">0</b> <em>% full</em></span></div>
+            <div class="stat"><span class="k">CONTROL MODE</span><span class="v"><b id="ndMode">LOCAL</b></span></div>
+            <div class="stat"><span class="k">GATE</span><span class="v"><b id="ndGate">&mdash;</b></span></div>
+          </dl>
+        </details>
       </div>
 
       <!-- ---- ROAD DETAIL ---- -->
@@ -201,85 +253,92 @@
             <h3 id="rdName">&mdash;</h3>
             <span class="chip" id="rdClass">ARTERIAL</span>
           </div>
-          <span class="status" id="rdStatus">OPEN</span>
+          <div class="head-right">
+            <span class="status" id="rdStatus">OPEN</span>
+            <button class="xbtn" id="btnCloseRoadPanel" aria-label="Close">&times;</button>
+          </div>
         </div>
 
-        <div class="stat-grid">
-          <div class="stat"><span class="k">CAPACITY</span><span class="v"><b id="rdCapacity">0</b> <em>veh</em></span></div>
-          <div class="stat"><span class="k">LOAD</span><span class="v"><b id="rdLoad">0</b> <em>veh</em></span></div>
-          <div class="stat"><span class="k">SATURATION</span><span class="v"><b id="rdSat">0</b> <em>%</em></span></div>
-          <div class="stat"><span class="k">TRAVEL TIME</span><span class="v"><b id="rdTime">0.0</b> <em>s</em></span></div>
-          <div class="stat"><span class="k">THROUGHPUT</span><span class="v"><b id="rdFlow">0</b> <em>veh/h</em></span></div>
-          <div class="stat"><span class="k">SOURCE</span><span class="v"><b id="rdFrom">&mdash;</b></span></div>
+        <div class="vitals">
+          <div class="vital" id="vitSat"><span class="k">SATURATION</span><b id="rdSat">0</b><em>%</em></div>
+          <div class="vital" id="vitLoad"><span class="k">LOAD</span><b id="rdLoad">0</b><em>veh</em></div>
+          <div class="vital" id="vitTime"><span class="k">TRAVEL</span><b id="rdTime">0.0</b><em>s</em></div>
         </div>
 
         <div class="block">
           <div class="block-head"><span>LANE ALLOCATION</span><span class="mono-soft" id="rdLanes">2 / 2</span></div>
           <div class="lane-split">
-            <div class="lane-dir">
-              <span class="lane-name" id="laneAName">A &rarr; B</span>
-              <span class="lane-count" id="laneACount">2</span>
-            </div>
+            <div class="lane-dir"><span class="lane-name" id="laneAName">A &rarr; B</span><span class="lane-count" id="laneACount">2</span></div>
             <div class="lane-bar"><i id="laneABar"></i></div>
             <div class="lane-bar rev"><i id="laneBBar"></i></div>
-            <div class="lane-dir">
-              <span class="lane-name" id="laneBName">B &rarr; A</span>
-              <span class="lane-count" id="laneBCount">2</span>
-            </div>
+            <div class="lane-dir"><span class="lane-name" id="laneBName">B &rarr; A</span><span class="lane-count" id="laneBCount">2</span></div>
           </div>
-          <div class="btn-row">
-            <button class="btn ghost" id="btnLaneLeft" data-cost-key="lanes"><span>SHIFT LANE &#9664;</span></button>
-            <button class="btn ghost" id="btnLaneRight" data-cost-key="lanes"><span>SHIFT LANE &#9654;</span></button>
-          </div>
-          <p class="hint">Reallocating a lane raises capacity on one approach and removes it from the other. Total
-            right-of-way is fixed — the trade is zero-sum.</p>
+          <button class="btn wide" id="btnLaneLeft" data-cost-key="lanes">
+            <span class="btn-label" id="laneLeftLbl">SHIFT A LANE</span>
+            <span class="btn-sub">TAKES A LANE FROM THE OPPOSING APPROACH</span>
+          </button>
+          <button class="btn wide" id="btnLaneRight" data-cost-key="lanes">
+            <span class="btn-label" id="laneRightLbl">SHIFT A LANE</span>
+            <span class="btn-sub">TAKES A LANE FROM THE OPPOSING APPROACH</span>
+          </button>
+          <p class="hint">Right-of-way is fixed, so the trade is zero-sum: every lane one direction gains, the other direction loses.</p>
         </div>
 
         <div class="block">
           <div class="block-head"><span>SEGMENT ACTIONS</span></div>
-          <div class="btn-row">
-            <button class="btn ghost" id="btnCloseRoad" data-cost-key="closure"><span class="btn-label">CLOSE SEGMENT</span></button>
-            <button class="btn ghost" id="btnCorridorRoad" data-cost-key="corridor"><span class="btn-label">ROUTE OVER SEGMENT</span></button>
-          </div>
-          <p class="hint">Closure removes the link from the routing graph entirely. Traffic redistributes onto the
-            shortest remaining alternatives until those saturate.</p>
+          <button class="btn wide" id="btnCloseRoad" data-cost-key="closure">
+            <span class="btn-label" id="closureLbl">CLOSE SEGMENT</span>
+            <span class="btn-sub" id="closureSub">REMOVES THE LINK FROM THE ROUTING GRAPH</span>
+          </button>
+          <button class="btn wide" id="btnCorridorRoad" data-cost-key="corridor">
+            <span class="btn-label">ROUTE EMERGENCY OVER SEGMENT</span>
+            <span class="btn-sub">AUTHORISE A CORRIDOR THROUGH THIS LINK</span>
+          </button>
         </div>
+
+        <details class="adv">
+          <summary>Segment detail</summary>
+          <dl class="stat-grid">
+            <div class="stat"><span class="k">STORAGE CAPACITY</span><span class="v"><b id="rdCapacity">0</b> <em>veh</em></span></div>
+            <div class="stat"><span class="k">THROUGHPUT</span><span class="v"><b id="rdFlow">0</b> <em>veh/h</em></span></div>
+            <div class="stat"><span class="k">FROM</span><span class="v"><b id="rdFrom">&mdash;</b></span></div>
+            <div class="stat"><span class="k">TO</span><span class="v"><b id="rdTo">&mdash;</b></span></div>
+          </dl>
+        </details>
       </div>
 
-      <!-- ---- SYSTEM CONTROLS ---- -->
-      <div class="block system-block">
-        <div class="block-head"><span>SYSTEM INTERVENTIONS</span></div>
-        <button class="btn wide" id="btnCorridor" data-cost-key="corridor">
-          <span class="btn-label">EMERGENCY CORRIDOR</span>
-          <span class="btn-sub" id="corridorSub">NO ACTIVE INCIDENT</span>
-        </button>
-        <button class="btn wide" id="btnRedirect" data-cost-key="redirect">
-          <span class="btn-label">TRAFFIC REDIRECTION</span>
-          <span class="btn-sub" id="redirectSub">DISABLED — ROUTING USES FREE-FLOW COST</span>
-        </button>
-        <div class="readout">
-          <div><span class="k">DEMAND</span><b id="demandVal">0.0</b><em>veh/s</em></div>
-          <div><span class="k">CONDITIONS</span><b id="condVal">CLEAR</b></div>
-          <div><span class="k">ACTIVE VEH</span><b id="activeVal">0</b></div>
-        </div>
-      </div>
-    </aside>
-  </main>
-
-  <!-- ================= FEED ================= -->
-  <footer id="feed">
-    <div class="feed-left">
-      <div class="feed-head"><span>ACTIVE INCIDENTS</span></div>
-      <div id="incidentChips"></div>
     </div>
-    <div class="feed-right">
+  </aside>
+
+  <!-- ======================= DAY TIMELINE ======================= -->
+  <div id="timeline">
+    <div class="tl-head">
+      <span>DAY OPERATIONS TIMELINE</span>
+      <span class="mono-soft" id="tlNow">07:00</span>
+    </div>
+    <div class="tl-track" id="tlTrack">
+      <div class="tl-phases" id="tlPhases"></div>
+      <div class="tl-events" id="tlEvents"></div>
+      <i class="tl-play" id="tlPlay"></i>
+    </div>
+  </div>
+
+  <!-- ======================= EVENT TICKER ======================= -->
+  <div id="feed">
+    <button id="feedToggle">
+      <i id="feedDot"></i>
+      <span class="feed-tag" id="feedTag">SYSTEM</span>
+      <span class="feed-msg" id="feedLatest">Awaiting network telemetry.</span>
+      <b class="feed-caret">LOG</b>
+    </button>
+    <div id="feedBody">
       <div class="feed-head"><span>SIMULATION LOG</span><span class="mono-soft" id="feedClock">07:00</span></div>
       <div id="feedList"></div>
     </div>
-  </footer>
+  </div>
 </div>
 
-<!-- ================= OVERLAY ================= -->
+<!-- ======================= OVERLAY ======================= -->
 <div id="overlay">
 
   <!-- LOADING -->
@@ -299,10 +358,15 @@
   <section id="scrMenu" class="screen">
     <div class="menu-wrap">
       <div class="menu-head">
-        <h2>SYSTEM AUTHORITY GRANTED</h2>
-        <p>You are the traffic engineer for a connected city network. Twelve signalised intersections, thirty road
-          directions, one budget. Demand rises through the day and incidents will occur. There is no configuration
-          that removes congestion — only ones that move it.</p>
+        <div class="menu-brand">
+          <div class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 22 22"><rect x="2.5" y="2.5" width="17" height="17" rx="3"/><path d="M2.5 11h17M11 2.5v17"/></svg>
+          </div>
+          <h2>GRIDLOCK</h2>
+        </div>
+        <p>You are the traffic engineer for a connected city network. Twelve signalised intersections, one budget, one
+          day. Demand rises and incidents happen. There is no setting that removes congestion — only ones that move it
+          somewhere you have to live with.</p>
       </div>
 
       <div class="menu-label">SELECT OPERATING SCENARIO</div>
@@ -312,7 +376,7 @@
         <button class="btn primary" id="btnStart">BEGIN SIMULATION</button>
         <button class="btn ghost" id="btnHow">HOW TO PLAY</button>
       </div>
-      <p class="menu-foot">Runs entirely offline in the browser. No backend, no network calls.</p>
+      <p class="menu-foot">Runs entirely offline in the browser. No backend, no network calls, no build step.</p>
     </div>
   </section>
 
@@ -326,31 +390,35 @@
       <div class="how-grid">
         <div class="how-col">
           <h4>OBJECTIVE</h4>
-          <p>Keep the whole network moving for one simulated day. You are graded on system-wide throughput,
-            stability, budget discipline, public impact and emergency response — never on clearing a single junction.</p>
+          <p>Keep the whole network moving for one simulated day. You are graded on system-wide throughput, stability,
+            budget discipline, public impact and emergency response — never on clearing a single junction.</p>
+          <h4 class="how-sub">READING THE MAP</h4>
+          <p>Roads are coloured by how full they are, from teal through amber to red. Queues at a junction spill back
+            along the road feeding it. A red road three junctions from where you were working is usually your own doing.</p>
         </div>
         <div class="how-col">
           <h4>CONTROLS</h4>
           <ul>
-            <li>Click an intersection to inspect volume, queue, wait time and signal state.</li>
-            <li>Adjust green splits, enable bus priority, or synchronise a corridor.</li>
+            <li>Click a junction to inspect and retime its signals.</li>
             <li>Click a road to reallocate lanes or close the segment.</li>
-            <li>Authorise an emergency corridor when an incident vehicle is en route.</li>
-            <li>Speed controls: HOLD, 1&times;, 2&times;, 4&times; — or the keys below.</li>
+            <li>Authorise an emergency corridor when a response vehicle is en route.</li>
+            <li>Scroll to zoom, drag to pan, double-click a junction to focus it.</li>
+            <li>The timeline along the bottom shows what is coming next.</li>
           </ul>
           <h4 class="how-sub">KEYS</h4>
           <ul class="key-list">
             <li><kbd>SPACE</kbd> hold / resume</li>
             <li><kbd>1</kbd><kbd>2</kbd><kbd>4</kbd> simulation speed</li>
             <li><kbd>&larr;</kbd><kbd>&rarr;</kbd> previous / next junction</li>
-            <li><kbd>ESC</kbd> clear selection &middot; <kbd>H</kbd> this brief</li>
+            <li><kbd>F</kbd> fit network &middot; <kbd>ESC</kbd> clear selection</li>
           </ul>
         </div>
         <div class="how-col">
           <h4>THE PRINCIPLE</h4>
           <p>Every intervention is a change to a coupled system. Giving one approach more green pushes its platoon into
-            the next junction. Closing a link is not removing traffic — it is relocating it. Watch the map, not the
-            dashboard: congestion that appears three junctions away is usually your own doing.</p>
+            the next junction. Closing a link is not removing traffic — it is relocating it.</p>
+          <p class="how-note">When you change something, watch for the small badge that appears on the map about half a
+            minute later. That is the measured consequence, not a scripted message.</p>
         </div>
       </div>
       <div class="menu-actions">
@@ -370,7 +438,8 @@
         <div class="report-meta">
           <div><span class="k">SIMULATED SPAN</span><b id="repElapsed">&mdash;</b></div>
           <div><span class="k">TRIPS COMPLETED</span><b id="repTrips">&mdash;</b></div>
-          <div><span class="k">SYSTEM RATING</span><b id="repRating">&mdash;</b></div>
+          <div><span class="k">SYSTEM GRADE</span><b id="repRating">&mdash;</b></div>
+          <div><span class="k">COMPOSITE</span><b id="repComposite">&mdash;</b></div>
         </div>
       </div>
 
