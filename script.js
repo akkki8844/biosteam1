@@ -3659,6 +3659,13 @@ class UI {
         this.selectAsset(hit);
         const n = this.sim.city.nodeById[hit.id];
         this.renderer.focusOn(n.x, n.y, Math.max(this.renderer.camT.scale, (this.renderer.minScale || 1) * 1.9));
+      } else if (hit && hit.kind === 'road') {
+        const rd = this.sim.roads.find(r => r.name === hit.name && r.rev === hit.rev);
+        if (rd) {
+          this.selectAsset(hit);
+          this.renderer.focusOn(rd.mid.x, rd.mid.y,
+            Math.max(this.renderer.camT.scale, (this.renderer.minScale || 1) * 1.9));
+        }
       }
     });
 
@@ -4288,6 +4295,9 @@ class UI {
       : last.level === 'good' ? 't-good' : '';
   }
 
+  /* Incidents are the things a player most often needs to look at, so each chip
+     carries the asset it refers to and doubles as a jump-to. The chip and the
+     number it shows still come from the same state the map is drawn from. */
   renderIncidents() {
     const sim = this.sim;
     const wrap = this.$('incidentChips');
@@ -4295,23 +4305,54 @@ class UI {
     for (const rd of sim.roads) {
       if (rd.rev || !rd.incident) continue;
       const left = Math.max(0, Math.round(rd.incident.until - sim.time));
-      items.push({ label: `ACCIDENT · ${rd.name}`, t: left, col: '#cd5a4f', dur: Math.max(1, rd.incident.until) });
+      items.push({ label: `ACCIDENT · ${rd.name}`, t: left, col: '#cd5a4f',
+        hit: { kind: 'road', name: rd.name, rev: rd.rev } });
     }
     for (const l of sim.links) {
       if (!l.a.closed) continue;
-      items.push({ label: `CLOSED · ${l.name}`, t: null, col: '#8a5a55', dur: 1 });
+      items.push({ label: `CLOSED · ${l.name}`, t: null, col: '#8a5a55',
+        hit: { kind: 'road', name: l.a.name, rev: l.a.rev } });
     }
     for (const n of sim.nodes) {
       if (!n.outage) continue;
-      items.push({ label: `SIGNAL LOSS · ${n.name}`, t: Math.max(0, Math.round(n.outageUntil - sim.time)), col: '#d5a03f', dur: 1 });
+      items.push({ label: `SIGNAL LOSS · ${n.name}`, t: Math.max(0, Math.round(n.outageUntil - sim.time)),
+        col: '#d5a03f', hit: { kind: 'node', id: n.id } });
     }
-    if (sim.activeEv) items.push({ label: `RESPONSE VEHICLE EN ROUTE`, t: null, col: '#46c7d6', dur: 1 });
-    if (sim.weather.until > sim.time) items.push({ label: `HEAVY RAIN · NETWORK WIDE`, t: Math.max(0, Math.round(sim.weather.until - sim.time)), col: '#6f93b5', dur: 1 });
+    if (sim.activeEv) {
+      const dest = sim.city.nodeById[sim.activeEv.destNode];
+      items.push({ label: 'RESPONSE VEHICLE EN ROUTE', t: null, col: '#46c7d6',
+        hit: dest ? { kind: 'node', id: dest.id } : null });
+    }
+    if (sim.weather.until > sim.time) {
+      items.push({ label: 'HEAVY RAIN · NETWORK WIDE',
+        t: Math.max(0, Math.round(sim.weather.until - sim.time)), col: '#6f93b5', hit: null });
+    }
 
-    if (!items.length) { wrap.innerHTML = '<div class="inc-empty">No active incidents. Network operating within design parameters.</div>'; return; }
-    wrap.innerHTML = items.map(i =>
-      `<div class="inc-chip"><i style="background:${i.col}"></i><span>${i.label}</span><span class="t">${i.t == null ? '—' : i.t + 's'}</span></div>`
+    if (!items.length) {
+      wrap.innerHTML = '<div class="inc-empty">No active incidents. Network operating within design parameters.</div>';
+      return;
+    }
+    wrap.innerHTML = items.map((i, k) =>
+      `<button class="inc-chip${i.hit ? ' jumpable' : ''}" data-k="${k}">` +
+      `<i style="background:${i.col}"></i><span>${i.label}</span>` +
+      `<span class="t">${i.t == null ? '\u2014' : i.t + 's'}</span></button>`
     ).join('');
+    this._incHits = items.map(i => i.hit);
+    wrap.querySelectorAll('.inc-chip.jumpable').forEach(el => {
+      el.addEventListener('click', () => {
+        const hit = this._incHits[parseInt(el.dataset.k, 10)];
+        if (!hit) return;
+        this.selectAsset(hit);
+        const target = hit.kind === 'node'
+          ? this.sim.city.nodeById[hit.id]
+          : this.sim.roads.find(r => r.name === hit.name && r.rev === hit.rev);
+        if (target && this.renderer) {
+          this.renderer.focusOn(target.x != null ? target.x : target.mid.x,
+            target.y != null ? target.y : target.mid.y,
+            Math.max(this.renderer.camT.scale, (this.renderer.minScale || 1) * 1.6));
+        }
+      });
+    });
   }
 
   /* ---------- actions ---------- */

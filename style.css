@@ -425,6 +425,10 @@ kbd{
 }
 .inc-chip i{width:5px;height:5px;border-radius:50%;flex:0 0 auto}
 .inc-chip .t{font-family:var(--mono);font-size:8.5px;color:var(--muted);margin-left:auto}
+/* an incident chip that refers to something on the map is a jump-to */
+.inc-chip.jumpable{width:100%;text-align:left;cursor:pointer;transition:.15s}
+.inc-chip.jumpable:hover{background:rgba(255,255,255,.06);border-color:var(--line-2);color:var(--text)}
+.inc-chip.jumpable:active{transform:translateY(1px)}
 .inc-empty{font-size:10.5px;color:var(--faint);line-height:1.6;padding:2px 0}
 
 .next-event{
