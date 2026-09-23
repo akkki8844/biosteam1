@@ -25,15 +25,43 @@ python -m http.server 8000
 The map is the interface. It fills the window and everything else floats over
 it, so no panel ever steals width from the network:
 
-- **Top bar** — clock, operating phase, live system grade.
+- **Top bar** — clock, operating phase, live system grade, pacing controls.
 - **Metric strip** — six network indicators with inline trend traces.
+- **Map layers** — switch the link colouring, place names and bus network on
+  and off, so the same city can be read as a congestion map, a schematic, or a
+  transit map.
 - **Day timeline** — the shift laid out end to end: demand phases as bands,
   scheduled events as ticks, and a playhead showing where you are.
-- **Control panel** — either the current situation, or the selected asset.
+- **Control panel** — scenario objectives pinned at the top, then either the
+  current situation or the selected asset.
 - **Event ticker** — the latest log line; click to expand the full log.
 
-Selecting a junction or road replaces the situation card with its controls.
-Everything else stays out of the way until it is needed.
+Selecting a junction or road replaces the situation card with its controls. The
+objectives stay pinned above it, because the moment you open a junction's
+controls is exactly the moment its objective matters. Everything else stays out
+of the way until it is needed.
+
+The map carries its own furniture — a scale bar, a north mark — so it reads as a
+plan drawing rather than a picture.
+
+### Pacing
+
+The clock runs at hold, 1×, 2× or 4×. **NEXT EVENT** fast-forwards to just before
+the next scheduled event, stepping the simulation at its own fixed timestep — so
+a skipped stretch is the same day you would have sat through, not an
+approximation of it. That is what makes a seven-minute shift finish inside five.
+
+### Reverting
+
+Every completed decision can be undone once, refunding its cost. **REVERT** in
+the panel head (or `R`) rolls back the most recent intervention only, so an
+experiment you regret does not have to be lived with for the rest of the shift.
+
+### Objectives
+
+Each scenario carries three measurable objectives, shown live with progress and
+evaluated against the same report the final grade uses. Doing nothing fails all
+three: the passive reference run completes none of them in any scenario.
 
 ## The three shifts
 
@@ -67,6 +95,23 @@ drawn where it happened rather than asserted in a text box.
 The same measurements are written up in prose in the post-run analysis under
 *System Consequences*.
 
+## Against doing nothing
+
+The analysis closes with the comparison the whole project is about. At the end of
+every run the scenario is re-simulated from scratch with nobody at the desk —
+same seed, same demand curve, same incidents, no interventions. Because the
+demand stream is drawn from its own random stream, independent of player action,
+that re-run is an exact counterfactual rather than a model of one: a shift that
+changed nothing scores identically to it, to the decimal.
+
+The report tabulates both runs side by side and then reads the two headline
+movements together, because the combination is what says whether traffic was
+*removed* from the system or merely pushed around it:
+
+- wait down and congestion up — redistributed, not solved
+- wait and congestion both down — an actual capacity gain
+- both up — the interventions cost more than they recovered
+
 ## How it works
 
 `script.js` is a self-contained microsimulation:
@@ -99,6 +144,8 @@ The same measurements are written up in prose in the post-run analysis under
 | `←` `→` | Step through junctions |
 | `F` | Fit the network to view |
 | `Esc` | Deselect |
+| `N` | Skip to the next scheduled event |
+| `R` | Revert the last decision |
 | `H` | Operating brief (mid-game: resume) |
 
 ## Development
@@ -107,7 +154,8 @@ Test harnesses are gitignored but kept locally by convention:
 
 - `_verify.js` — simulation invariants: scenario baselines, determinism,
   intervention settling, badge emission and expiry, closure cascade, live
-  grade agreement, budget floor
+  grade agreement, budget floor, counterfactual integrity, and fast-forward
+  equivalence (a skipped run reproduces the frame-stepped run exactly)
 - `_calib.js` — lever-by-lever scoring calibration across scenarios
 - `_ev.js` — emergency-vehicle lifecycle and corridor payoff
 - `_order.js` — vehicle ordering / storage invariants
@@ -116,6 +164,7 @@ Test harnesses are gitignored but kept locally by convention:
 
 ```bash
 node _verify.js     # expects "N passed, 0 failed"
+bash _shot.sh       # re-renders every screen to shots/
 ```
 
 ## Stack

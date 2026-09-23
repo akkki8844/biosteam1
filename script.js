@@ -207,6 +207,17 @@ const SCENARIOS = [
       { t: 352, kind: 'spike', mult: 1.35, duration: 60, title: 'SUDDEN TRAFFIC SPIKE', body: 'Unmodelled demand injection across the network.' },
       { t: 386, kind: 'outage', nodes: [5, 6], duration: 70, title: 'SIGNAL POWER OUTAGE — CENTRAL', body: 'Central Junction and Kingsway on all-way flash. Junction throughput derated 60%.' },
       { t: 405, kind: 'transit', duration: 40, rate: 0.34, title: 'TRANSIT BUNCHING', body: 'Bus headways collapsed on Central Boulevard.' }
+    ],
+    /* Measured from the simulation with no interventions at all, on this seed.
+       The demand stream is independent of player actions, so this is an exact
+       counterfactual rather than an estimate — the objective targets below are
+       set as a real improvement on it, and the suite asserts it still
+       reproduces so the comparison can never silently drift. */
+    baseline: { avgWait: 47.4, avgCong: 30.8, servedRatio: 49.4, emergency: 8.0, composite: 51.1 },
+    objectives: [
+      { key: 'avgWait', dir: 'below', target: 40, unit: 's', label: 'Mean junction wait under 40s' },
+      { key: 'servedRatio', dir: 'above', target: 56, unit: '%', label: 'Serve 56% of trip demand' },
+      { key: 'emergency', dir: 'above', target: 60, unit: '', label: 'Emergency response above 60' }
     ]
   },
   {
@@ -238,6 +249,15 @@ const SCENARIOS = [
       { t: 292, kind: 'accident', link: 'Harbor Approach', severity: 0.8, duration: 95, title: 'ACCIDENT — HARBOR APPROACH', body: 'Pedestrian-vehicle incident at the junction mouth.' },
       { t: 330, kind: 'spike', mult: 1.3, duration: 55, title: 'SUDDEN TRAFFIC SPIKE', body: 'Unmodelled demand injection across the network.' },
       { t: 356, kind: 'rain', duration: 70, title: 'HEAVY RAIN — NETWORK WIDE', body: 'Advisory speeds reduced 28%. Junction capacity derated 15%.' }
+    ],
+    baseline: { avgWait: 39.0, avgCong: 36.2, servedRatio: 53.3, emergency: 8.0, composite: 52.7 },
+    /* This shift is the hardest of the three: the stadium surge is not
+       suppressible, only absorbable, so the bar is set to what a diligent
+       engineer actually reaches here rather than a round number. */
+    objectives: [
+      { key: 'emergency', dir: 'above', target: 55, unit: '', label: 'Emergency response above 55' },
+      { key: 'stability', dir: 'above', target: 63, unit: '', label: 'System stability above 63' },
+      { key: 'servedRatio', dir: 'above', target: 57, unit: '%', label: 'Serve 57% of trip demand' }
     ]
   },
   {
@@ -268,6 +288,14 @@ const SCENARIOS = [
       { t: 232, kind: 'rain', duration: 100, title: 'HEAVY RAIN — NETWORK WIDE', body: 'Advisory speeds reduced 28%. Junction capacity derated 15%.' },
       { t: 282, kind: 'transit', duration: 70, rate: 0.3, title: 'PUBLIC TRANSPORT SURGE', body: 'Rail replacement buses dispatched after a signalling failure.' },
       { t: 322, kind: 'spike', mult: 1.3, duration: 38, title: 'SUDDEN TRAFFIC SPIKE', body: 'Unmodelled demand injection across the network.' }
+    ],
+    /* This shift already opens with a road shut, so its inherited reference is
+       the strongest of the three — the bar has to clear that, not just beat it. */
+    baseline: { avgWait: 37.8, avgCong: 25.2, servedRatio: 63.2, emergency: 78.1, composite: 69.6 },
+    objectives: [
+      { key: 'servedRatio', dir: 'above', target: 66, unit: '%', label: 'Serve 66% of trip demand' },
+      { key: 'emergency', dir: 'above', target: 88, unit: '', label: 'Emergency response above 88' },
+      { key: 'stability', dir: 'above', target: 78, unit: '', label: 'System stability above 78' }
     ]
   }
 ];
@@ -493,6 +521,11 @@ class Simulation {
   constructor(scenarioId, seedOverride) {
     this.scenario = SCENARIOS.find(s => s.id === scenarioId) || SCENARIOS[0];
     this.rng = mulberry32(seedOverride || this.scenario.seed);
+    /* Driver behaviour draws from its own stream. If rerouting shared the demand
+       stream, every intervention would shift the sequence of future arrivals,
+       and the "leave the plan alone" reference would stop being a true
+       counterfactual — the comparison would be against a different day. */
+    this.rngTraffic = mulberry32((seedOverride || this.scenario.seed) ^ 0x5bf03635);
 
     this.city = new City();
     this.nodes = this.city.nodes;
@@ -709,7 +742,7 @@ class Simulation {
       if (!rd.cars.length) continue;
       for (const car of rd.cars) {
         if (car.speed > 5) continue;
-        if (this.rng() > 0.34) continue;
+        if (this.rngTraffic() > 0.34) continue;
         this.rerouteCar(car, rd);
       }
     }
@@ -801,7 +834,7 @@ class Simulation {
     let guard = 0;
     while (this.busAcc >= 1 && guard++ < 8) {
       this.busAcc -= 1;
-      const bp = this.busPaths[Math.floor(this.rng() * this.busPaths.length)];
+      const bp = this.busPaths[Math.floor(this.rngTraffic() * this.busPaths.length)];
       if (!bp) continue;
       if (bp.path.some(r => r.closed)) continue;
       this.spawn(bp.path, 'bus', bp.path[bp.path.length - 1].to.id);
@@ -838,7 +871,7 @@ class Simulation {
     car.path = path;
     car.pathIdx = 0;
     car.pos = 0;
-    car.lane = Math.floor(this.rng() * Math.max(1, first.lanes));
+    car.lane = Math.floor(this.rngTraffic() * Math.max(1, first.lanes));
     car.speed = Math.min(22, first.effSpeed * 0.45);
     car.destNode = destNode;
     first.cars.push(car);
@@ -1399,9 +1432,12 @@ class Simulation {
     return { nodeWait, nodeCong, roadSat };
   }
 
-  recordIntervention(label, detail, cost, spec) {
+  recordIntervention(label, detail, cost, spec, undo) {
     /* Repeated nudges at the same control surface are one engineering decision,
-       not eight. Coalesce them so the post-run analysis reads as a decision log. */
+       not eight. Coalesce them so the post-run analysis reads as a decision log.
+       The undo snapshot is deliberately not refreshed on coalesce: the original
+       one still describes the state before the first nudge, which is exactly
+       where a revert should land. */
     const key = label + '|' + JSON.stringify(spec || {});
     const last = this.interventions[this.interventions.length - 1];
     if (last && last.key === key && this.time - last.t < 35) {
@@ -1417,10 +1453,223 @@ class Simulation {
       clock: formatClock(this.scenario.startClock, this.time, CFG.clockRate),
       before: this.snapshot(),
       after: null,
+      undo: undo || null,
       measureAt: this.time + 26
     };
     this.interventions.push(rec);
     return rec;
+  }
+
+  /* ---------- control state, for reverting a decision ---------- */
+
+  /* Everything the player can set, in one small object. Signal splits, offsets,
+     coordination, bus priority, lane bias, closures and the two network-wide
+     toggles. Snapshotting the whole thing rather than per-action diffs means a
+     revert is exact for every action — including coordination, which touches a
+     dozen junctions at once and would be error-prone to unwind incrementally. */
+  controlSnapshot() {
+    return {
+      nodes: this.nodes.map(n => ({
+        id: n.id, ns: n.nsGreen, ew: n.ewGreen, off: n.offset, sync: n.syncAxis, bus: n.busPriority
+      })),
+      links: this.links.map(l => ({ bias: l.bias, closed: l.a.closed })),
+      redirection: this.redirection,
+      corridorAuthorized: this.corridorAuthorized
+    };
+  }
+
+  restoreControls(s) {
+    for (const e of s.nodes) {
+      const n = this.city.nodeById[e.id];
+      n.nsGreen = e.ns; n.ewGreen = e.ew; n.offset = e.off;
+      n.syncAxis = e.sync; n.busPriority = e.bus;
+    }
+    this.links.forEach((l, i) => {
+      l.bias = s.links[i].bias;
+      l.applyLanes();
+      l.a.closed = s.links[i].closed;
+      l.b.closed = s.links[i].closed;
+      l.a.closeReason = l.b.closeReason = s.links[i].closed ? 'ENGINEER CLOSURE' : null;
+    });
+    this.redirection = s.redirection;
+    this.corridorAuthorized = s.corridorAuthorized;
+    if (!this.corridorAuthorized) this.corridor = null;
+    this.routeVersion++;
+    this.rebuildRouting();
+    this._live = null;                       // the grade must not be stale
+  }
+
+  /* The revoke control. Experimenting is the whole point of the exercise, and it
+     is only cheap to experiment if a wrong move can be taken back — so a revert
+     refunds the credits and drops the decision from the log entirely. */
+  undoLast() {
+    if (this.finished) return { ok: false, msg: 'THE SHIFT IS CLOSED' };
+    const rec = this.interventions[this.interventions.length - 1];
+    if (!rec) return { ok: false, msg: 'NOTHING TO REVERT' };
+    if (!rec.undo) return { ok: false, msg: 'THIS DECISION CANNOT BE REVERTED' };
+    this.restoreControls(rec.undo);
+    this.budget = Math.min(CFG.startBudget, this.budget + rec.cost);
+    this.spent = Math.max(0, this.spent - rec.cost);
+    this.interventions.pop();
+    this.flashes.length = 0;
+    this.log('info', 'REVERTED', `${rec.label} — ${rec.detail}. Credits returned.`);
+    return { ok: true, refund: rec.cost, msg: 'REVERTED — ' + rec.label };
+  }
+
+  /* ---------- diagnosis ---------- */
+
+  /* Wall-clock minutes past midnight. clockRate is simulated *seconds* per real
+     second, so this mirrors formatClock's conversion exactly. */
+  clockMinutes() { return this.scenario.startClock + (this.time * CFG.clockRate) / 60; }
+
+  /* Which axis is being starved here. Compares the *worst-loaded* approach on
+     each axis rather than their averages, because a signal serves one axis at a
+     time and it is the standing queue that hurts, not the mean condition. */
+  axisPressure(n) {
+    let ns = 0, ew = 0;
+    for (const rd of n.incoming) {
+      if (rd.closed) continue;
+      if (rd.axis === 'NS') ns = Math.max(ns, rd.saturation);
+      else ew = Math.max(ew, rd.saturation);
+    }
+    return { ns, ew };
+  }
+
+  /* Every asset ranked by how much trouble it is in, so the console can point at
+     the problem instead of leaving the engineer to hunt for a red road. */
+  hotspots(limit) {
+    const out = [];
+    for (const n of this.nodes) {
+      const w = clamp01(n.waitEma / 45), c = clamp01(n.congestion / 100), q = clamp01(n.queue / 30);
+      let sev = (w * 0.42 + c * 0.38 + q * 0.20) * 100;
+      if (n.outage) sev = Math.min(100, sev + 22);
+      out.push({
+        kind: 'node', id: n.id, name: n.name, sev,
+        detail: `${Math.round(n.queue)} queued \u00b7 ${n.waitEma.toFixed(0)}s wait`,
+        x: n.x, y: n.y
+      });
+    }
+    for (const rd of this.roads) {
+      if (rd.rev || rd.closed || rd.saturation < 0.72) continue;
+      out.push({
+        kind: 'road', name: rd.name, rev: rd.rev,
+        sev: clamp01(rd.saturation) * 100 * (rd.incident ? 1.08 : 1),
+        detail: `${Math.round(rd.saturation * 100)}% full${rd.incident ? ' \u00b7 incident' : ''}`,
+        x: rd.mid.x, y: rd.mid.y
+      });
+    }
+    out.sort((a, b) => b.sev - a.sev);
+    return out.slice(0, limit || 4);
+  }
+
+  /* Plain-language guidance: what to look at, and what is worth trying there.
+     Every line is derived from the same measured state the map is drawn from, so
+     the advice cannot drift away from what is actually happening. */
+  advisory() {
+    const list = [];
+    const ev = this.activeEv;
+
+    if (ev && !this.corridorAuthorized && !this.corridorActive()) {
+      const dest = this.city.nodeById[ev.destNode];
+      list.push({
+        kind: 'corridor', urgency: 'crit', title: 'Response vehicle en route',
+        detail: `A response vehicle is inbound to ${dest ? dest.name : 'the incident'}. ` +
+          'Authorising a corridor holds cross traffic so it can clear each junction on the way.',
+        brief: 'response vehicle en route',
+        action: 'AUTHORISE'
+      });
+    }
+
+    for (const s of this.hotspots(3)) {
+      if (s.kind === 'node') {
+        const n = this.city.nodeById[s.id];
+        if (n.outage) {
+          list.push({
+            kind: 'node', id: n.id, severity: 'crit', title: n.name, x: n.x, y: n.y, action: 'VIEW',
+            brief: 'all-way flash · no control',
+            detail: 'Signals are dark on all-way flash. Retiming will do nothing here — move traffic around it and let the fault clear.'
+          });
+          continue;
+        }
+        const p = this.axisPressure(n);
+        const share = n.nsGreen / Math.max(1, n.nsGreen + n.ewGreen);
+        const nsP = Math.round(p.ns * 100), ewP = Math.round(p.ew * 100);
+        let detail, preset = null;
+        /* Rebalancing only helps if the favoured axis has somewhere to put the
+           traffic. When both axes are near saturation there is no spare capacity
+           to move green *to*, and reallocating merely relocates the queue — so
+           the saturated-either-way case is answered as a symptom, not a fix. */
+        /* A signal plan needs time to work. Recommending a change faster than the
+           queues it governs can respond to produces flip-flopping between splits,
+           which costs a lost phase every time and leaves both streets worse. This
+           is real practice as well as a game rule: plans are held for a settling
+           period before being re-judged. */
+        const settling = (this.time - (n.planAt ?? -1e9)) < 90;
+        const nsStarved = !settling && p.ns > 0.55 && p.ns - p.ew > 0.16 && p.ew < 0.8;
+        const ewStarved = !settling && p.ew > 0.55 && p.ew - p.ns > 0.16 && p.ns < 0.8;
+        if (p.ns > 0.78 && p.ew > 0.78) {
+          detail = `Both axes are saturated (${nsP}% / ${ewP}%). No signal split can clear this — ` +
+            'there is nowhere for the traffic to go. It is a symptom; the cause is upstream, or the demand itself.';
+        } else if (nsStarved && share < 0.6) {
+          detail = `The north-south approaches are the fuller pair (${nsP}% v ${ewP}%) but NS holds only ` +
+            `${Math.round(share * 100)}% of the green, and the east-west side still has room. Favouring NS would clear it.`;
+          preset = 'NS';
+        } else if (ewStarved && share > 0.4) {
+          detail = `The east-west approaches are the fuller pair (${ewP}% v ${nsP}%) but EW holds only ` +
+            `${Math.round((1 - share) * 100)}% of the green, and the north-south side still has room. Favouring EW would clear it.`;
+          preset = 'EW';
+        } else if (p.ns > 0.7 && p.ew > 0.7) {
+          detail = `Both axes are heavily loaded (${nsP}% / ${ewP}%). The split here is already matched to demand, ` +
+            'so this junction is a symptom — the cause is what is feeding it.';
+        } else if (n.busPriority) {
+          detail = `Bus priority is armed, holding the cross phase for transit. That is deliberate — ` +
+            'the cost shows up as extra waiting on the side street.';
+        } else {
+          detail = `The green split already matches the approach loads (${nsP}% / ${ewP}%). ` +
+            'Changing it here would move the queue rather than clear it.';
+        }
+        list.push({ kind: 'node', id: n.id, severity: 'warn', title: n.name, detail, preset, action: 'VIEW', x: n.x, y: n.y,
+          brief: `${nsP}% / ${ewP}% approach load` });
+      } else {
+        const rd = this.roads.find(r => r.name === s.name && r.rev === s.rev);
+        const other = rd ? (rd.link.a === rd ? rd.link.b : rd.link.a) : null;
+        let detail;
+        if (rd && rd.incident) {
+          detail = 'An incident is holding this segment. Traffic will only move around it — reroute, or route emergency traffic through.';
+        } else if (other && rd && rd.lanes > other.lanes) {
+          detail = `Running at ${s.detail}, and the lanes are already biased this way. The opposing direction is the one carrying the cost.`;
+        } else {
+          detail = `Running at ${s.detail}. Shifting a lane here adds capacity on this side and removes it from the other.`;
+        }
+        list.push({ kind: 'road', name: s.name, rev: s.rev, severity: 'warn', title: s.name, detail, action: 'VIEW', x: s.x, y: s.y,
+          brief: s.detail });
+      }
+    }
+    return list;
+  }
+
+  /* Scenario objectives, evaluated against the same live report the grade uses. */
+  objectiveStatus() {
+    const R = this.liveReport();
+    const read = (o) => {
+      switch (o.key) {
+        case 'avgWait': return R.avgWait;
+        case 'avgCong': return R.avgCong;
+        case 'servedRatio': return R.servedRatio * 100;
+        case 'emergency': return R.scores.emergency;
+        case 'budget': return R.budget;
+        case 'stability': return R.stability;
+        default: return 0;
+      }
+    };
+    return (this.scenario.objectives || []).map(o => {
+      const value = read(o);
+      const met = o.dir === 'above' ? value >= o.target : value <= o.target;
+      const prog = met ? 1 : (o.dir === 'above'
+        ? clamp01(value / o.target)
+        : clamp01(o.target / Math.max(0.001, value)));
+      return { label: o.label, unit: o.unit, dir: o.dir, target: o.target, value, met, prog };
+    });
   }
 
   settleInterventions() {
@@ -1514,13 +1763,42 @@ class Simulation {
     const n = this.city.nodeById[nodeId];
     const cost = CFG.costs.signal;
     if (!this.spend(cost)) return { ok: false, msg: 'INSUFFICIENT BUDGET' };
+    const undo = this.controlSnapshot();
     const key = axis === 'NS' ? 'nsGreen' : 'ewGreen';
     const before = n[key];
     n[key] = clamp(n[key] + delta, 6, 46);
     if (n[key] === before) { this.budget += cost; this.spent -= cost; return { ok: false, msg: 'LIMIT REACHED' }; }
     const detail = `${n.name} · ${axis} green ${delta > 0 ? '+' : ''}${delta}s → ${n[key]}s`;
-    this.recordIntervention('Signal re-timing', detail, cost, { nodeId, axis });
+    this.recordIntervention('Signal re-timing', detail, cost, { nodeId, axis }, undo);
     this.log('info', 'CONTROL', `${detail}. Cycle now ${n.cycle}s.`);
+    return { ok: true, cost, msg: detail };
+  }
+
+  /* One-click rebalance. Most of signal timing is mechanical arithmetic, and the
+     engineering judgement is in deciding *whether* to favour an axis at all —
+     which is exactly the part left to the player. The 64/36 split is a working
+     figure rather than an optimum, and deliberately a moderate one: push the
+     green further and the side street starts paying for it, which is the trap
+     the shift is meant to teach. */
+  applyPreset(nodeId, mode) {
+    const n = this.city.nodeById[nodeId];
+    if (n.outage) return { ok: false, msg: 'SIGNAL LOSS — NO CONTROL AT THIS JUNCTION' };
+    const total = n.nsGreen + n.ewGreen;
+    let ns = total * 0.5;
+    if (mode === 'NS') ns = total * 0.64;
+    else if (mode === 'EW') ns = total * 0.36;
+    n.planAt = this.time;
+    ns = clamp(Math.round(ns), 6, 46);
+    const ew = clamp(total - ns, 6, 46);
+    if (ns === n.nsGreen && ew === n.ewGreen) return { ok: false, msg: 'ALREADY AT THAT SPLIT' };
+    const cost = CFG.costs.signal;
+    if (!this.spend(cost)) return { ok: false, msg: 'INSUFFICIENT BUDGET' };
+    const undo = this.controlSnapshot();
+    n.nsGreen = ns; n.ewGreen = ew;
+    const label = mode === 'NS' ? 'Favour NS' : mode === 'EW' ? 'Favour EW' : 'Balanced split';
+    const detail = `${n.name} · NS ${ns}s / EW ${ew}s (cycle ${n.cycle}s)`;
+    this.recordIntervention(label, detail, cost, { nodeId, axis: mode, preset: true }, undo);
+    this.log('info', 'CONTROL', `${label} — ${detail}.`);
     return { ok: true, cost, msg: detail };
   }
 
@@ -1529,8 +1807,9 @@ class Simulation {
     const cost = CFG.costs.bus;
     if (!n.busPriority) {
       if (!this.spend(cost)) return { ok: false, msg: 'INSUFFICIENT BUDGET' };
+      const undo = this.controlSnapshot();
       n.busPriority = true;
-      this.recordIntervention('Bus priority enabled', `${n.name} · transit pre-emption armed`, cost, { nodeId });
+      this.recordIntervention('Bus priority enabled', `${n.name} · transit pre-emption armed`, cost, { nodeId }, undo);
       this.log('good', 'POLICY', `${n.name} — transit pre-emption armed. Cross movements will be held.`);
       return { ok: true, cost, msg: 'BUS PRIORITY ENABLED' };
     }
@@ -1546,11 +1825,12 @@ class Simulation {
     const nb = clamp(link.bias + dir, -(link.baseLanes - 1), link.baseLanes - 1);
     if (nb === link.bias) return { ok: false, msg: 'ALLOCATION AT LIMIT' };
     if (!this.spend(cost)) return { ok: false, msg: 'INSUFFICIENT BUDGET' };
+    const undo = this.controlSnapshot();
     link.bias = nb;
     link.applyLanes();
     this.routeVersion++;
     const detail = `${link.name} · ${link.a.lanes} / ${link.b.lanes} lanes (${link.def.a === road.from.id ? 'A' : 'B'} favoured)`;
-    this.recordIntervention('Lane reallocation', detail, cost, { roadName: link.name });
+    this.recordIntervention('Lane reallocation', detail, cost, { roadName: link.name }, undo);
     this.log('warn', 'GEOMETRY', `${detail}. Opposing approach capacity reduced.`);
     return { ok: true, cost, msg: detail };
   }
@@ -1567,9 +1847,10 @@ class Simulation {
     const cost = CFG.costs.closure;
     if (!link.a.closed) {
       if (!this.spend(cost)) return { ok: false, msg: 'INSUFFICIENT BUDGET' };
+      const undo = this.controlSnapshot();
       this.setLinkClosed(link.a, true, 'ENGINEER CLOSURE');
       const detail = `${link.name} · segment removed from network`;
-      this.recordIntervention('Road closure', detail, cost, { roadName: link.name, closed: true });
+      this.recordIntervention('Road closure', detail, cost, { roadName: link.name, closed: true }, undo);
       this.log('crit', 'CLOSURE', `${detail}. Traffic redistributing onto remaining corridors.`);
       return { ok: true, cost, msg: detail };
     }
@@ -1598,10 +1879,11 @@ class Simulation {
        corridor serve here" without rescanning the route every tick. */
     const nodeAxis = {};
     for (const e of nodes) nodeAxis[e.nodeId] = e.axis;
+    const undo = this.controlSnapshot();
     this.corridor = { nodes, roadSet: new Set(ev.path), nodeAxis };
     this.corridorAuthorized = true;
     const detail = `Corridor cleared across ${nodes.length} junctions along ${ev.path.length} segments`;
-    this.recordIntervention('Emergency corridor', detail, cost, { ev: true });
+    this.recordIntervention('Emergency corridor', detail, cost, { ev: true }, undo);
     this.log('crit', 'CORRIDOR', `${detail}. Cross movements held for the duration of the response.`);
     return { ok: true, cost, msg: 'CORRIDOR AUTHORISED' };
   }
@@ -1610,9 +1892,10 @@ class Simulation {
     const cost = CFG.costs.redirect;
     if (!this.redirection) {
       if (!this.spend(cost)) return { ok: false, msg: 'INSUFFICIENT BUDGET' };
+      const undo = this.controlSnapshot();
       this.redirection = true;
       this.rebuildRouting();
-      this.recordIntervention('Traffic redirection', 'Routing cost weighted by observed saturation — vehicles reroute around congestion', cost, { global: true });
+      this.recordIntervention('Traffic redirection', 'Routing cost weighted by observed saturation — vehicles reroute around congestion', cost, { global: true }, undo);
       this.log('warn', 'ROUTING', 'Saturation-weighted rerouting enabled. Vehicles will leave loaded corridors.');
       return { ok: true, cost, msg: 'REDIRECTION ENABLED' };
     }
@@ -1628,6 +1911,7 @@ class Simulation {
     if (!this.spend(cost)) return { ok: false, msg: 'INSUFFICIENT BUDGET' };
     const group = this.nodes.filter(n => (axis === 'EW' ? n.r === node.r : n.c === node.c));
     if (group.length < 2) { this.budget += cost; this.spent -= cost; return { ok: false, msg: 'NO ADJACENT JUNCTIONS' }; }
+    const undo = this.controlSnapshot();
     group.sort((a, b) => (axis === 'EW' ? a.x - b.x : a.y - b.y));
 
     /* Coordination harmonises the cycle length and sets progression offsets.
@@ -1655,7 +1939,7 @@ class Simulation {
       n.offset = ((greenStart - travel) % cycle + cycle) % cycle;
     }
     const detail = `${axis === 'EW' ? 'ROW' : 'COLUMN'} through ${group.map(n => n.name).join(' → ')} · ${cycle}s common cycle`;
-    this.recordIntervention('Signal synchronisation', detail, cost, { nodeId, axis, group: group.map(n => n.id) });
+    this.recordIntervention('Signal synchronisation', detail, cost, { nodeId, axis, group: group.map(n => n.id) }, undo);
     this.log('warn', 'COORDINATION', `Progression established on the ${axis === 'EW' ? 'east-west' : 'north-south'} corridor — ${cycle}s common cycle across ${group.length} junctions.`);
     return { ok: true, cost, msg: `GREEN WAVE — ${group.length} JUNCTIONS` };
   }
@@ -1957,6 +2241,17 @@ function buildTerrain() {
 /* The HUD floats over the map, so the camera fits the network into the region
    that is *not* covered by chrome. These numbers mirror the CSS custom
    properties; keeping them here means the fit stays correct at any size. */
+/* Deterministic pseudo-random in [0,1) from two integers. Used for weather
+   placement so rain falls the same way in every frame it is redrawn. */
+function hash01(i, k) {
+  const v = Math.sin(i * 12.9898 + k * 78.233) * 43758.5453;
+  return v - Math.floor(v);
+}
+
+/* Dashboard ticks (~6/s) between advisory re-evaluations. Advice that rewrites
+   itself several times a second is unreadable and unclickable. */
+const ADV_REFRESH_TICKS = 8;
+
 const HUD = {
   gutter: 10, topbar: 54, metrics: 64, panel: 320, strip: 44, ticker: 30,
   get left() { return this.gutter + 6; },
@@ -1979,6 +2274,9 @@ class Renderer {
     this.hover = null;
     this.selected = null;
     this.t = 0;
+    /* What the map is showing. The console draws one city and lets the operator
+       choose which reading of it to look at, rather than having separate views. */
+    this.layers = { heat: true, names: true, transit: true };
     this.terrain = buildTerrain();
     this._laneCache = new Map();
     this._bounds = null;
@@ -2169,7 +2467,7 @@ class Renderer {
     this.drawRoadSurfaces(ctx);
     this.drawLaneMarkings(ctx);
     this.drawStopBars(ctx);
-    this.drawBusRoutes(ctx);
+    if (this.layers.transit) this.drawBusRoutes(ctx);
     this.drawCorridor(ctx);
     this.drawCars(ctx);
     this.drawIncidents(ctx);
@@ -2179,8 +2477,104 @@ class Renderer {
     /* device-space pass: text keeps a constant on-screen size and stays sharp
        at any fitted scale */
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
-    this.drawLabels(ctx);
+    /* Atmosphere is painted between the two passes: the city itself is tinted by
+       the hour, while place names and callouts are drawn afterwards so they stay
+       crisp and legible whatever the light is doing. */
+    this.drawLight(ctx);
+    this.drawWeather(ctx);
+    if (this.layers.names) this.drawLabels(ctx);
     this.drawFlashes(ctx);
+    this.drawFurniture(ctx);
+  }
+
+  /* Map furniture: the scale bar and north mark every plan drawing carries.
+     Drawn in device space so it stays a fixed size and remains readable at any
+     zoom, the way it would on a printed schematic. */
+  drawFurniture(ctx) {
+    if (!this.sim) return;
+    ctx.save();
+    /* Anchored to the free rectangle rather than the viewport, so the furniture
+       always sits in the strip of map that no panel covers. */
+    const fr = this.freeRect();
+    const right = fr.x + fr.w - 8;
+    const bot = fr.y + fr.h - 10;
+
+    /* Scale bar: the roundest distance that lands between 70 and 150 px. */
+    const choices = [20, 50, 100, 200, 250, 500, 1000];
+    let dist = choices[0], px = choices[0] * this.cam.scale;
+    for (const c of choices) {
+      const p = c * this.cam.scale;
+      dist = c; px = p;
+      if (p >= 70) break;
+    }
+    ctx.strokeStyle = 'rgba(230,238,246,0.32)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(right - px, bot - 4); ctx.lineTo(right - px, bot + 4);
+    ctx.moveTo(right - px, bot); ctx.lineTo(right, bot);
+    ctx.moveTo(right, bot - 4); ctx.lineTo(right, bot + 4);
+    ctx.moveTo(right - px / 2, bot); ctx.lineTo(right - px / 2, bot + 2.5);
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(158,170,182,0.72)';
+    ctx.font = '8.5px ui-monospace, monospace';
+    ctx.textAlign = 'right'; ctx.textBaseline = 'bottom';
+    ctx.fillText(`${dist} m`, right, bot - 7);
+
+    /* North mark, above the scale bar, clear of the timeline strip. */
+    const nx = right - 4, ny = bot - 34;
+    ctx.strokeStyle = 'rgba(230,238,246,0.30)';
+    ctx.beginPath();
+    ctx.moveTo(nx, ny + 11); ctx.lineTo(nx, ny - 5);
+    ctx.moveTo(nx - 4, ny); ctx.lineTo(nx, ny - 5); ctx.lineTo(nx + 4, ny);
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(158,170,182,0.62)';
+    ctx.font = '8px ui-monospace, monospace';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    ctx.fillText('N', nx, ny + 13);
+    ctx.restore();
+  }
+
+  /* Daylight, keyed to the simulated clock. The three shifts open at dawn, in
+     morning light and at dusk, so the same network reads differently in each. */
+  drawLight(ctx) {
+    if (!this.sim.clockMinutes) return;
+    const h = (((this.sim.clockMinutes() / 60) % 24) + 24) % 24;
+    let col = null, a = 0;
+    if (h < 5) { col = '12,22,50'; a = 0.36; }
+    else if (h < 8) { col = '255,148,68'; a = 0.22 - (h - 5) / 3 * 0.17; }
+    else if (h < 16.5) { col = null; a = 0; }
+    else if (h < 20) { col = '255,138,60'; a = 0.05 + (h - 16.5) / 3.5 * 0.20; }
+    else { col = '12,22,50'; a = 0.36; }
+
+    /* Rain darkens and cools the whole scene rather than being drawn on top of
+       it, which is how an overcast city actually looks. */
+    const wet = this.sim.weather && this.sim.weather.speed < 1;
+    if (wet) {
+      if (col) { a = Math.min(0.42, a + 0.10); }
+      else { col = '40,58,84'; a = 0.13; }
+    }
+    if (!col) return;
+    ctx.fillStyle = `rgba(${col},${a.toFixed(3)})`;
+    ctx.fillRect(0, 0, this.cw, this.ch);
+  }
+
+  drawWeather(ctx) {
+    const sim = this.sim;
+    if (!sim.weather || sim.weather.speed >= 1) return;
+    const t = this.t;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(170,198,224,0.15)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    const n = Math.round(this.cw / 10);
+    for (let i = 0; i < n; i++) {
+      const x = ((hash01(i, 1) * (this.cw + 160) + t * 80) % (this.cw + 160)) - 80;
+      const y = ((hash01(i, 2) * (this.ch + 140) + t * 640) % (this.ch + 140)) - 70;
+      ctx.moveTo(x, y);
+      ctx.lineTo(x - 4, y + 12);
+    }
+    ctx.stroke();
+    ctx.restore();
   }
 
   drawDistricts(ctx) {
@@ -2209,32 +2603,118 @@ class Renderer {
       ctx.lineWidth = 0.6;
       ctx.strokeRect(b.x + 0.3, b.y + 0.3, b.w - 0.6, b.h - 0.6);
     }
+    /* Rooftop detail on the taller blocks. Sub-metre marks that only resolve
+       when you zoom in, which is what makes close inspection worth doing. */
+    ctx.save();
+    for (const b of t.buildings) {
+      if (b.tone < 0.74 || b.w < 26 || b.h < 24) continue;
+      ctx.fillStyle = 'rgba(255,255,255,0.022)';
+      ctx.fillRect(b.x + b.w * 0.22, b.y + b.h * 0.22, b.w * 0.56, b.h * 0.56);
+      ctx.strokeStyle = 'rgba(255,255,255,0.026)';
+      ctx.lineWidth = 0.5;
+      ctx.strokeRect(b.x + b.w * 0.22, b.y + b.h * 0.22, b.w * 0.56, b.h * 0.56);
+    }
+    ctx.restore();
+
+    /* ---------------- the harbour ----------------
+       The city sits on the west and south edges of the basin, so the working
+       waterfront is the near side and open water is the far side. Water is
+       deepest seaward, the apron carries container stacks and cranes, piers
+       reach out from the land, and the swell drifts. A single flat rectangle
+       read as a dead panel, which is the one thing a harbour must not look
+       like. Everything is placed from a fixed hash, so the quay does not
+       shuffle between frames. */
     const h = HARBOUR;
-    ctx.fillStyle = 'rgba(58,96,124,0.17)';
-    ctx.beginPath();
-    ctx.roundRect ? ctx.roundRect(h.x, h.y, h.w, h.h, 6) : ctx.rect(h.x, h.y, h.w, h.h);
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(96,146,180,0.30)';
-    ctx.lineWidth = 1;
-    ctx.stroke();
-    /* quay edges give the basin a working waterfront instead of a blue box */
-    ctx.strokeStyle = 'rgba(96,146,180,0.16)';
-    for (let i = 1; i < 4; i++) {
-      const y = h.y + (h.h / 4) * i;
-      ctx.beginPath(); ctx.moveTo(h.x, y); ctx.lineTo(h.x + h.w * 0.55, y); ctx.stroke();
-    }
-    /* piers and moored hulls, so the basin reads as a working waterfront */
-    for (let i = 0; i < 3; i++) {
-      const py = h.y + 34 + i * 76, pw2 = 52 + (i % 2) * 16;
-      ctx.fillStyle = 'rgba(10,14,18,0.9)';
-      ctx.fillRect(h.x + h.w - pw2 - 4, py - 3.5, pw2, 7);
-      ctx.fillStyle = 'rgba(126,176,210,0.5)';
-      ctx.fillRect(h.x + h.w - pw2 - 4, py + 3.5, pw2, 1.6);
-      ctx.fillStyle = 'rgba(200,214,224,0.35)';
+    const basin = () => {
       ctx.beginPath();
-      ctx.roundRect ? ctx.roundRect(h.x + 14, py - 4 + i * 5, 16, 8, 3) : ctx.rect(h.x + 14, py - 4 + i * 5, 16, 8);
-      ctx.fill();
+      ctx.roundRect ? ctx.roundRect(h.x, h.y, h.w, h.h, 7) : ctx.rect(h.x, h.y, h.w, h.h);
+    };
+
+    const water = ctx.createLinearGradient(h.x, h.y + h.h, h.x + h.w, h.y);
+    water.addColorStop(0, 'rgba(46,84,112,0.40)');
+    water.addColorStop(0.45, 'rgba(34,66,92,0.50)');
+    water.addColorStop(1, 'rgba(20,42,64,0.62)');
+    ctx.fillStyle = water;
+    basin();
+    ctx.fill();
+
+    ctx.save();
+    basin();
+    ctx.clip();
+
+    /* swell — long, shallow, drifting, so the basin is never quite still */
+    const drift = (this.t * 2.4) % 26;
+    ctx.strokeStyle = 'rgba(150,196,226,0.070)';
+    ctx.lineWidth = 0.9;
+    for (let i = -1; i < 12; i++) {
+      const y = h.y + i * 26 + drift;
+      ctx.beginPath();
+      ctx.moveTo(h.x - 8, y);
+      ctx.bezierCurveTo(h.x + h.w * 0.3, y - 3.2, h.x + h.w * 0.7, y + 3.2, h.x + h.w + 8, y);
+      ctx.stroke();
     }
+
+    /* quay coping: a pale lip where the water meets the apron */
+    ctx.fillStyle = 'rgba(140,184,214,0.20)';
+    ctx.fillRect(h.x, h.y, 2.4, h.h);
+    ctx.fillRect(h.x, h.y + h.h - 2.4, h.w, 2.4);
+
+    /* piers reaching out from the land, with bollards along the deck */
+    for (let i = 0; i < 2; i++) {
+      const py = h.y + 52 + i * 108;
+      const pw = h.w * (i ? 0.56 : 0.72);
+      ctx.fillStyle = 'rgba(12,17,22,0.92)';
+      ctx.fillRect(h.x, py, pw, 8);
+      ctx.fillStyle = 'rgba(140,184,214,0.24)';
+      ctx.fillRect(h.x, py + 8, pw, 1.4);
+      ctx.fillStyle = 'rgba(198,214,226,0.22)';
+      for (let b = 0; b < 6; b++) ctx.fillRect(h.x + 12 + b * (pw - 22) / 5, py + 3.4, 1.6, 1.6);
+      /* hulls lying alongside the pier */
+      const hulls = i ? 2 : 3;
+      for (let v = 0; v < hulls; v++) {
+        const hx = h.x + 20 + v * (pw / hulls) + hash01(i * 7 + v, 3) * 10;
+        const hl = 20 + hash01(i * 5 + v, 4) * 16;
+        ctx.fillStyle = 'rgba(186,202,214,0.30)';
+        ctx.beginPath();
+        ctx.roundRect ? ctx.roundRect(hx, py + 12, hl, 6, 2.5) : ctx.rect(hx, py + 12, hl, 6);
+        ctx.fill();
+        ctx.fillStyle = 'rgba(200,218,230,0.20)';
+        ctx.fillRect(hx + hl * 0.32, py + 9.5, hl * 0.34, 2.4);
+      }
+    }
+
+    /* container stacks on the apron, three to a row, tones from the palette */
+    const stackTone = ['rgba(198,148,62,0.30)', 'rgba(96,150,180,0.30)', 'rgba(160,110,96,0.28)', 'rgba(120,150,132,0.28)'];
+    for (let r = 0; r < 8; r++) {
+      for (let c = 0; c < 3; c++) {
+        if (hash01(r * 3 + c, 9) < 0.22) continue;
+        const bx = h.x + h.w - 12 - c * 13;
+        const by = h.y + 12 + r * 27 + hash01(r + c, 11) * 8;
+        ctx.fillStyle = stackTone[Math.floor(hash01(r * 3 + c, 13) * 4) % 4];
+        ctx.fillRect(bx - 9, by, 9.5, 5.6);
+      }
+    }
+
+    /* two ship-to-shore cranes, legs on the quay and jib over the water */
+    ctx.strokeStyle = 'rgba(206,220,230,0.26)';
+    ctx.lineWidth = 1.2;
+    for (let i = 0; i < 2; i++) {
+      const cx = h.x + h.w - 30 - i * 34;
+      const cy = h.y + 26 + i * 96;
+      ctx.beginPath();
+      ctx.moveTo(cx - 7, cy + 12); ctx.lineTo(cx - 7, cy - 12);
+      ctx.lineTo(cx + 24, cy - 12);
+      ctx.moveTo(cx + 3, cy - 12); ctx.lineTo(cx + 3, cy + 4);
+      ctx.moveTo(cx - 7, cy + 12); ctx.lineTo(cx + 6, cy + 12);
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    /* the basin's own edge, drawn over the water so it reads as a quay wall */
+    ctx.strokeStyle = 'rgba(112,164,200,0.34)';
+    ctx.lineWidth = 1;
+    basin();
+    ctx.stroke();
     ctx.restore();
   }
 
@@ -2338,13 +2818,19 @@ class Renderer {
         continue;
       }
 
-      ctx.strokeStyle = rgb(congestionRGB(rd.saturation));
+      if (this.layers.heat) {
+        ctx.strokeStyle = rgb(congestionRGB(rd.saturation));
+      } else {
+        /* Heat off: neutral asphalt, so geometry, lane count and incidents are
+           readable without the traffic colouring competing with them. */
+        ctx.strokeStyle = '#2b3138';
+      }
       ctx.lineWidth = w;
       ctx.stroke();
 
       /* A link past ~60% of storage gets a warm bloom, so a queue that is
          forming is visible before anyone has to read a number. */
-      if (rd.saturation > 0.6) {
+      if (this.layers.heat && rd.saturation > 0.6) {
         ctx.globalAlpha = (rd.saturation - 0.6) / 0.4 * 0.2;
         ctx.strokeStyle = '#ff7a58';
         ctx.lineWidth = w + 8;
@@ -2400,11 +2886,17 @@ class Renderer {
     ctx.restore();
   }
 
+  /* The bus network carries its own colour, so a transit corridor is legible
+     even when the link underneath it is deep red. */
   drawBusRoutes(ctx) {
     ctx.save();
-    ctx.setLineDash([2, 6]);
-    ctx.lineWidth = 1.6;
-    ctx.strokeStyle = 'rgba(192,141,58,0.30)';
+    ctx.lineCap = 'round';
+    const sc = clamp(this.cam.scale / Math.max(0.001, this.minScale || 1), 1, 2.4);
+    ctx.setLineDash([3 * sc, 7 * sc]);
+    ctx.lineWidth = 1.5 * sc;
+    ctx.strokeStyle = 'rgba(198,148,62,0.42)';
+    ctx.shadowColor = 'rgba(198,148,62,0.30)';
+    ctx.shadowBlur = 5;
     for (const rd of this.sim.roads) {
       if (!rd.isBusRoute || rd.closed) continue;
       ctx.beginPath();
@@ -2818,6 +3310,13 @@ class UI {
     this.drag = null;
     this.feedOpen = false;
     this.tlFor = null;
+    /* First-run coaching: three prompts that retire themselves once the player
+       has actually done the three things the console is built around. */
+    this.coachStep = 0;
+    this.coachDone = false;
+    this._advSig = null;
+    this._advAll = [];
+    this.advTimer = 0;
 
     this.buildScenarioCards();
     this.bindEvents();
@@ -2937,6 +3436,176 @@ class UI {
     this.$('btnRedirect').addEventListener('click', () => this.doRedirect());
     this.$('btnCloseNode').addEventListener('click', () => this.selectAsset(null));
     this.$('btnCloseRoadPanel').addEventListener('click', () => this.selectAsset(null));
+    this.$('btnUndo').addEventListener('click', () => this.doUndo());
+    this.$('btnPresetNs').addEventListener('click', () => this.doPreset('NS'));
+    this.$('btnPresetBal').addEventListener('click', () => this.doPreset('BALANCE'));
+    this.$('btnPresetEw').addEventListener('click', () => this.doPreset('EW'));
+    this.$('btnSkip').addEventListener('click', () => this.skipToNext());
+
+    /* Map layers. Clicking a chip is the whole interaction — the map re-reads
+       itself on the next frame rather than being rebuilt. */
+    this.$('layerCtrls').querySelectorAll('.lchip').forEach(chip => {
+      chip.addEventListener('click', () => this.toggleLayer(chip.dataset.layer, chip));
+    });
+  }
+
+  toggleLayer(name, chip) {
+    if (!this.renderer) return;
+    const on = !this.renderer.layers[name];
+    this.renderer.layers[name] = on;
+    chip.classList.toggle('on', on);
+    const label = name === 'heat' ? 'Link colouring' : name === 'names' ? 'Place names' : 'Bus network';
+    this.toast(`${label.toUpperCase()} ${on ? 'ON' : 'OFF'}`, 'info');
+  }
+
+  /* ---------- advisory / objectives / revert ---------- */
+
+  coachCard() {
+    if (this.coachDone) return null;
+    if (this.coachStep === 0) return {
+      coach: true, step: '1 / 3', title: 'Pick a junction to work on',
+      detail: 'The advisory below ranks the network\u2019s worst trouble spots. Click one to fly there, or click any junction on the map yourself.'
+    };
+    if (this.coachStep === 1) return {
+      coach: true, step: '2 / 3', title: 'Change its signal timing',
+      detail: 'Its controls are in this panel now. Three preset splits do the arithmetic for you \u2014 deciding which axis deserves the green is the part that is up to you.'
+    };
+    if (this.coachStep === 2) return {
+      coach: true, step: '3 / 3', title: 'Watch for the consequence',
+      detail: 'Roughly half a minute after a decision, a badge appears on the map showing what changed and where. It is rarely all good news.'
+    };
+    return null;
+  }
+
+  /* Re-evaluated on a slow cadence and re-rendered only when the content really
+     changes. Rebuilding every frame would make the text flicker and would steal
+     the pointer target out from under the cursor. */
+  renderAdvisory() {
+    const list = this.sim.advisory();
+    const coach = this.coachCard();
+    const items = coach ? [coach].concat(list) : list;
+    this._advAll = items;
+
+    const sig = items.map(a =>
+      `${a.coach ? 'c' : a.kind}:${a.id != null ? a.id : (a.name || '')}:${a.preset || ''}:${a.urgency || a.severity || ''}:${a.action || ''}`
+    ).join('|');
+    if (sig === this._advSig) return;
+    this._advSig = sig;
+
+    this.$('advCount').textContent = list.length ? `${list.length} FLAGGED` : '\u2014';
+    const wrap = this.$('advisory');
+    if (!items.length) {
+      wrap.innerHTML = '<div class="adv-empty">No faults flagged. The network is running within design '
+        + 'parameters \u2014 a good moment to prepare for what the timeline shows coming next.</div>';
+      return;
+    }
+    /* Compaction. The ranked list can otherwise read as four versions of one
+       sentence, which is worse than saying nothing: findings that repeat word
+       for word are dropped, and only the leading one keeps its full
+       explanation. The rest carry their numbers, which is the part you act on. */
+    const seen = new Set();
+    const kept = [];
+    for (const a of items) {
+      const key = a.coach ? 'coach' : (a.title + '|' + (a.brief || '')).toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      kept.push(a);
+      if (!a.coach && kept.filter(k => !k.coach).length >= 3) break;
+    }
+    wrap.innerHTML = kept.map(a => {
+      const i = items.indexOf(a);
+      const crit = a.urgency === 'crit' || a.severity === 'crit';
+      const cls = a.coach ? 'coach' : crit ? 'crit' : 'warn';
+      const badge = a.coach ? 'STEP ' + a.step : crit ? 'ACT NOW' : '';
+      const first = kept.filter(k => !k.coach)[0] === a;
+      const body = first
+        ? `<div class="adv-body">${a.detail}</div>`
+        : `<div class="adv-body">${a.brief || ''}</div>`;
+      const act = a.action
+        ? `<span class="adv-act${crit ? ' urgent' : ''}">` +
+          `${a.action === 'AUTHORISE' ? 'AUTHORISE CORRIDOR' : 'SHOW ME'}</span>`
+        : '';
+      return `<button class="adv-card ${cls}" data-i="${i}">` +
+        `<div class="adv-title"><b>${a.title}</b><span>${badge}</span></div>${body}${act}</button>`;
+    }).join('');
+
+    wrap.querySelectorAll('.adv-card').forEach(el => {
+      el.addEventListener('click', () => this.onAdvisory(parseInt(el.dataset.i, 10)));
+    });
+  }
+
+  /* Clicking advice acts on it: the corridor item authorises, everything else
+     takes the camera to the asset it is talking about. */
+  onAdvisory(i) {
+    const a = this._advAll[i];
+    if (!a || a.coach) return;
+    if (a.kind === 'corridor') { this.doCorridor(); return; }
+    if (a.x == null || !this.renderer) return;
+    if (a.kind === 'node') this.selectAsset({ kind: 'node', id: a.id });
+    else this.selectAsset({ kind: 'road', name: a.name, rev: a.rev });
+    this.renderer.focusOn(a.x, a.y, Math.max(this.renderer.camT.scale, (this.renderer.minScale || 1) * 1.7));
+  }
+
+  renderObjectives() {
+    const sim = this.sim;
+    const list = sim.objectiveStatus();
+    this.$('objectives').innerHTML = list.map(o => {
+      const dp = o.unit === '%' ? 0 : 1;
+      return `<div class="obj${o.met ? ' met' : ''}">` +
+        `<span class="obj-mark">${o.met ? '\u2713' : ''}</span>` +
+        `<div class="obj-body"><div class="obj-label">${o.label}</div>` +
+        `<div class="obj-track"><i style="width:${(o.prog * 100).toFixed(0)}%"></i></div></div>` +
+        `<span class="obj-val">${o.value.toFixed(dp)}${o.unit}</span></div>`;
+    }).join('');
+    const met = list.filter(o => o.met).length;
+    this.$('objMet').textContent = `${met} / ${list.length} MET`;
+    /* The bar to beat. Stated in the panel and then measured for real at the end
+       of the run, so the number a player is aiming at is never a decoration. */
+    const b = sim.scenario.baseline;
+    this.$('objNote').innerHTML = b
+      ? `Unmanaged reference: <b>${b.avgWait.toFixed(1)}s</b> mean wait \u00b7 `
+        + `<b>${b.servedRatio.toFixed(0)}%</b> served \u00b7 composite <b>${b.composite.toFixed(0)}</b>.`
+      : '';
+  }
+
+  /* ---------- pacing ---------- */
+
+  /* Fast-forward through the quiet stretches to just before the next scheduled
+     event. The simulation is stepped at its own fixed timestep, so a skip is
+     the same day as waiting it out would have been — not an approximation of
+     one. This is what makes a seven-minute shift finish inside five. */
+  skipToNext() {
+    const sim = this.sim;
+    if (!sim || sim.finished) return;
+    const next = sim.events.find(e => e.t > sim.time);
+    const target = Math.min(sim.time + 200, next ? next.t - 2 : sim.duration - 1);
+    if (target - sim.time < 8) return;
+    const before = sim.cards.length;
+    const step = 1 / 60;
+    let guard = 0;
+    while (sim.time < target && !sim.finished && guard++ < 40000) sim.step(step);
+    this.accum = 0;
+    /* Cards for everything the skip passed are suppressed — the log keeps them,
+       and one toast says what was skipped rather than four the player never saw
+       happen in real time. */
+    const passed = sim.cards.length - before;
+    this.lastCardId = sim.cards.length;
+    const clock = formatClock(sim.scenario.startClock, sim.time, CFG.clockRate);
+    this.toast(passed
+      ? `CLOCK ADVANCED TO ${clock} — ${passed} EVENT${passed === 1 ? '' : 'S'} LOGGED`
+      : `CLOCK ADVANCED TO ${clock}`, 'info');
+    this._advSig = null;
+    this.updateDashboard();
+    if (sim.finished) this.showReport();
+  }
+
+  renderUndo() {
+    const btn = this.$('btnUndo');
+    const last = this.sim.interventions[this.sim.interventions.length - 1];
+    const can = !!last && !!last.undo && !this.sim.finished;
+    btn.disabled = !can;
+    btn.classList.toggle('hot', can);
+    btn.title = can ? `Revert: ${last.label} \u2014 ${last.detail}` : 'Nothing to revert';
   }
 
   /* Map navigation. The camera is the only thing these touch — driving the view
@@ -3035,6 +3704,8 @@ class UI {
     else if (e.key === 'f' || e.key === 'F') { if (this.renderer) this.renderer.fit(false); }
     else if (e.key === 'ArrowRight') this.cycleNode(1);
     else if (e.key === 'ArrowLeft') this.cycleNode(-1);
+    else if (e.key === 'n' || e.key === 'N') this.skipToNext();
+    else if (e.key === 'r' || e.key === 'R') this.doUndo();
   }
 
   cycleNode(dir) {
@@ -3070,6 +3741,10 @@ class UI {
     this.lastCardId = 0;
     this.tlFor = null;
     this.feedOpen = false;
+    this.coachStep = 0;
+    this.coachDone = false;
+    this._advSig = null;
+    this.advTimer = 0;
     this.$('feed').classList.remove('open');
     this.$('toastLayer').innerHTML = '';
     this.clearFeed();
@@ -3206,6 +3881,7 @@ class UI {
   selectAsset(hit) {
     this.selected = hit;
     if (this.renderer) this.renderer.selected = hit;
+    if (this.coachStep === 0 && hit && hit.kind === 'node') { this.coachStep = 1; this._advSig = null; }
     const sit = this.$('sitCard');
     const nd = this.$('detailNode');
     const rdd = this.$('detailRoad');
@@ -3339,6 +4015,15 @@ class UI {
     this.$('sysId').textContent = 'GRD-' + sim.scenario.num;
     this.renderLiveScores(R);
 
+    /* Coaching retires itself the moment its last lesson has visibly landed. */
+    if (this.coachStep === 2 && sim.flashes.length) {
+      this.coachStep = 3; this.coachDone = true; this._advSig = null;
+    }
+    if (++this.advTimer >= ADV_REFRESH_TICKS) { this.advTimer = 0; this._advSig = null; }
+    this.renderAdvisory();
+    this.renderObjectives();
+    this.renderUndo();
+
     const redirectBtn = this.$('btnRedirect');
     redirectBtn.classList.toggle('on', sim.redirection);
     this.$('redirectSub').textContent = sim.redirection
@@ -3409,6 +4094,16 @@ class UI {
     } else {
       ne.className = 'next-event idle';
       ne.innerHTML = '<span class="ne-t">\u2014</span><span class="ne-b">No further events scheduled. Close out the shift.</span>';
+    }
+
+    /* The skip control carries the same next-event reading, so the two can
+       never disagree about what is coming. */
+    const btn = this.$('btnSkip');
+    if (btn) {
+      const reachable = !sim.finished && next && (next.t - sim.time) > 14;
+      btn.disabled = !reachable;
+      this.$('skipIn').textContent = sim.finished ? '\u2014'
+        : next ? formatClock(sim.scenario.startClock, next.t, CFG.clockRate) : '\u2014';
     }
   }
 
@@ -3632,7 +4327,22 @@ class UI {
   apply(result) {
     if (!result) return;
     this.toast(result.msg, result.ok ? 'good' : 'bad');
-    if (result.ok) this.updateDashboard();
+    /* Advice is stale the moment a control moves, so it is re-evaluated now
+       rather than waiting for the next cadence tick. */
+    this._advSig = null;
+    if (result.ok) {
+      if (this.coachStep === 1) { this.coachStep = 2; this._advSig = null; }
+      this.updateDashboard();
+    }
+  }
+
+  doPreset(mode) {
+    if (!this.selected || this.selected.kind !== 'node') return;
+    this.apply(this.sim.applyPreset(this.selected.id, mode));
+  }
+
+  doUndo() {
+    this.apply(this.sim.undoLast());
   }
 
   doGreen(axis, delta) {
@@ -3667,6 +4377,8 @@ class UI {
     const sim = this.sim;
     const R = sim.report();
     const $ = x => this.$(x);
+    const objStatus = sim.objectiveStatus();
+    const objectivesMet = `${objStatus.filter(o => o.met).length} / ${objStatus.length}`;
     $('repScenario').textContent = `SCENARIO ${sim.scenario.num} — ${sim.scenario.name}`;
     $('repElapsed').textContent = `${formatClock(sim.scenario.startClock, 0, 1)} → ${formatClock(sim.scenario.startClock, sim.duration, CFG.clockRate)}`;
     $('repTrips').textContent = R.trips;
@@ -3695,7 +4407,8 @@ class UI {
       ['RESPONSES COMPLETED',
         R.evRequests === 0 ? '\u2014' : `${R.evCompleted} / ${R.evRequests}`,
         ''],
-      ['INTERVENTIONS APPLIED', sim.interventions.length, '']
+      ['INTERVENTIONS APPLIED', sim.interventions.length, ''],
+      ['SCENARIO OBJECTIVES MET', objectivesMet, '']
     ];
     $('perfGrid').innerHTML = cells.map(c =>
       `<div class="perf-cell"><span class="k">${c[0]}</span><span class="v">${c[1]}${c[2] ? `<em>${c[2]}</em>` : ''}</span></div>`
@@ -3735,6 +4448,102 @@ class UI {
       : `<div class="rec empty">No interventions were applied, so no second-order effects were observed. The measured network behaviour is the baseline case.</div>`;
 
     this.showScreen('scrReport');
+    $('baselineTable').innerHTML =
+      '<div class="baseline-state">Running the unmanaged reference \u2014 the same' +
+      ' scenario, same seed, no interventions\u2026</div>';
+    this.startBaselineRun(R);
+  }
+
+  /* The reference run. Because the demand stream is drawn from its own RNG (see
+     the split in Simulation) it is completely independent of what the player
+     did, so re-running the scenario with nobody at the desk is an exact
+     counterfactual rather than an estimate. It is stepped in slices between
+     animation frames: the analysis appears immediately and the comparison lands
+     a second later, instead of the screen locking up while it is computed. */
+  startBaselineRun(mine) {
+    const ref = new Simulation(this.sim.scenario.id);
+    const step = 1 / 60;
+    const slice = () => {
+      const t0 = performance.now();
+      while (!ref.finished && performance.now() - t0 < 22) ref.step(step);
+      if (!ref.finished) { requestAnimationFrame(slice); return; }
+      this.renderBaseline(mine, ref.report());
+    };
+    requestAnimationFrame(slice);
+  }
+
+  renderBaseline(mine, ref) {
+    const rows = [
+      { label: 'Mean junction wait', a: mine.avgWait, b: ref.avgWait, unit: 's', dp: 1, good: 'low' },
+      { label: 'Network congestion', a: mine.avgCong, b: ref.avgCong, unit: '%', dp: 1, good: 'low' },
+      { label: 'Demand served', a: mine.servedRatio * 100, b: ref.servedRatio * 100, unit: '%', dp: 1, good: 'high' },
+      { label: 'Trips completed', a: mine.completions, b: ref.completions, unit: '', dp: 0, good: 'high' },
+      { label: 'Trips abandoned', a: mine.abandoned, b: ref.abandoned, unit: '', dp: 0, good: 'low' },
+      { label: 'Mean trip travel time', a: mine.avgTravel, b: ref.avgTravel, unit: 's', dp: 1, good: 'low' },
+      { label: 'Emergency response', a: mine.evAvg, b: ref.evAvg, unit: 's', dp: 0, good: 'low' },
+      { label: 'Budget remaining', a: mine.budget / 1000, b: ref.budget / 1000, unit: 'k', dp: 0, good: 'high' },
+      { label: 'Composite score', a: mine.composite, b: ref.composite, unit: '', dp: 1, good: 'high' }
+    ];
+
+    const fmt = (v, r) => v == null ? '\u2014' : v.toFixed(r.dp) + (r.unit ? ' ' + r.unit : '');
+    const verdictClass = (r) => {
+      if (r.a == null || r.b == null) return 'flat';
+      const d = r.a - r.b;
+      const eps = r.dp ? 0.05 : 0.5;
+      if (Math.abs(d) < eps) return 'flat';
+      return (r.good === 'high' ? d > 0 : d < 0) ? 'better' : 'worse';
+    };
+    const strength = (r) => {
+      if (r.a == null || r.b == null) return '';
+      const d = r.a - r.b;
+      if (Math.abs(d) < (r.dp ? 0.05 : 0.5)) return '\u2014';
+      return (d > 0 ? '+' : '\u2212') + Math.abs(d).toFixed(r.dp) +
+        (r.unit === '%' ? 'pt' : r.unit === 'k' ? 'k' : r.unit ? ' ' + r.unit : '');
+    };
+
+    this.$('baselineTable').innerHTML =
+      '<div class="bl-head"><span>MEASURE</span><span>THIS RUN</span><span>UNMANAGED</span><span>DIFFERENCE</span></div>' +
+      rows.map(r => `<div class="bl-row"><span>${r.label}</span><b>${fmt(r.a, r)}</b>` +
+        `<i>${fmt(r.b, r)}</i><b class="${verdictClass(r)}">${strength(r)}</b></div>`).join('');
+
+    /* Read the two headline movements together. Individually they are just
+       numbers; the combination is what says whether traffic was removed from
+       the network or merely pushed around it. */
+    const waitV = verdictClass(rows[0]), congV = verdictClass(rows[1]);
+    const serveV = verdictClass(rows[2]);
+    const gap = mine.composite - ref.composite;
+    const gapTxt = `${gap >= 0 ? '+' : '\u2212'}${Math.abs(gap).toFixed(1)}`;
+    let shape;
+    if (waitV === 'better' && congV === 'worse') shape =
+      'Mean wait came down while network congestion went up. That is traffic being ' +
+      'moved around the system rather than removed from it \u2014 the classic second-order result.';
+    else if (waitV === 'worse' && congV === 'better') shape =
+      'Congestion fell while mean wait rose: the queues were spread thinner, so fewer people ' +
+      'sat in any one junction, but the average journey spent longer stopped.';
+    else if (waitV === 'better' && congV === 'better') shape =
+      'Wait and congestion both came down together, which is what an actual capacity gain looks ' +
+      'like rather than a redistribution.';
+    else if (waitV === 'worse' && congV === 'worse') shape =
+      'Neither headline measure improved. The interventions cost the network more than they ' +
+      'recovered \u2014 the most expensive outcome available.';
+    else if (Math.abs(gap) < 2) shape =
+      'The managed network finished close to the unmanaged one. Worth reading the decision log ' +
+      'against the consequences below: the same traffic was often simply moved between streets.';
+    else shape = 'The two headline measures moved in opposite directions depending on which part ' +
+      'of the network you look at, which is the normal result of optimising one component of a coupled system.';
+
+    const lead = gap > 2
+      ? `Managing the shift beat leaving the network alone by <b>${gapTxt} composite points</b>.`
+      : gap < -2
+        ? `The run finished <b>${gapTxt} composite points</b> below leaving the network alone.`
+        : `Composite finished within noise of leaving the network alone (<b>${gapTxt} points</b>).`;
+    const serve = serveV === 'better'
+      ? ` It also admitted <b>${(mine.servedRatio * 100 - ref.servedRatio * 100).toFixed(1)} percentage points</b> more of the demand it was asked to carry.`
+      : serveV === 'worse'
+        ? ` It served <b>${(ref.servedRatio * 100 - mine.servedRatio * 100).toFixed(1)} percentage points</b> less of the demand than doing nothing would have.`
+        : '';
+    this.$('baselineTable').insertAdjacentHTML('beforeend',
+      `<p class="bl-verdict">${lead}${serve} ${shape}</p>`);
   }
 }
 

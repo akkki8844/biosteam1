@@ -16,6 +16,13 @@
     <div id="tooltip" class="hidden"></div>
     <div id="cardLayer"></div>
 
+    <div id="layerCtrls">
+      <span class="lc-cap">MAP LAYERS</span>
+      <button class="lchip on" data-layer="heat" title="Colour every link by how full it is">HEAT</button>
+      <button class="lchip on" data-layer="names" title="Place names and junction labels">NAMES</button>
+      <button class="lchip" data-layer="transit" title="Highlight the bus network and its vehicles">TRANSIT</button>
+    </div>
+
     <div id="viewCtrls">
       <button class="vbtn" id="btnZoomIn" aria-label="Zoom in" title="Zoom in">&plus;</button>
       <button class="vbtn" id="btnZoomOut" aria-label="Zoom out" title="Zoom out">&minus;</button>
@@ -66,6 +73,7 @@
         <button class="speed" data-speed="2">2&times;</button>
         <button class="speed" data-speed="4">4&times;</button>
       </div>
+      <button class="skip" id="btnSkip"><span id="skipLbl">NEXT EVENT</span><b id="skipIn">&mdash;</b></button>
       <button class="btn ghost small" id="btnMenu">MENU</button>
     </div>
   </header>
@@ -131,7 +139,21 @@
   <aside id="panel">
     <div class="panel-head">
       <span>ENGINEERING CONTROL</span>
-      <span class="sysid" id="sysId">GRD-01</span>
+      <div class="head-tools">
+        <button class="revert" id="btnUndo" title="Revert the last decision and refund it">REVERT</button>
+        <span class="sysid" id="sysId">GRD-01</span>
+      </div>
+    </div>
+
+    <!-- Objectives are pinned above the scrolling body, so the goal stays on
+         screen while a junction or road panel is open. -->
+    <div class="obj-strip">
+      <div class="obj-strip-head">
+        <span>SCENARIO OBJECTIVES</span>
+        <span class="mono-soft" id="objMet">&mdash;</span>
+      </div>
+      <div id="objectives" class="objectives"></div>
+      <p class="obj-ref" id="objNote"></p>
     </div>
 
     <div id="panelBody">
@@ -149,11 +171,11 @@
           <div class="sit-cell"><span class="k">SERVED</span><b id="servedVal">0</b><em>%</em></div>
         </div>
 
+        <div class="block-head"><span>NETWORK ADVISORY</span><span class="mono-soft" id="advCount">&mdash;</span></div>
+        <div id="advisory" class="advisory"></div>
+
         <div class="block-head"><span>ACTIVE INCIDENTS</span></div>
         <div id="incidentChips"></div>
-
-        <div class="block-head"><span>NEXT SCHEDULED</span></div>
-        <div id="nextEvent" class="next-event"></div>
 
         <div class="block-head"><span>NETWORK-WIDE ACTIONS</span></div>
         <button class="btn wide" id="btnCorridor" data-cost-key="corridor">
@@ -165,8 +187,13 @@
           <span class="btn-sub" id="redirectSub">OFF — DRIVERS USE FREE-FLOW COST</span>
         </button>
 
-        <div class="block-head"><span>SCORE COMPOSITION</span><span class="mono-soft">LIVE</span></div>
-        <div class="live-scores" id="liveScores"></div>
+        <div class="block-head"><span>NEXT SCHEDULED</span></div>
+        <div id="nextEvent" class="next-event"></div>
+
+        <details class="adv">
+          <summary>Score composition</summary>
+          <div class="live-scores" id="liveScores"></div>
+        </details>
 
         <p class="hint">Select any junction or road on the map to open its controls. Scroll to zoom, drag to pan.</p>
       </div>
@@ -195,26 +222,36 @@
           <div class="split-bar"><i class="split-ns" id="splitNs"></i><i class="split-ew" id="splitEw"></i></div>
           <div class="split-legend"><span class="axis-ns">NS <b id="ndSplitNs">50</b>%</span><span class="axis-ew"><b id="ndSplitEw">50</b>% EW</span></div>
 
-          <div class="green-rows">
-            <div class="green-row">
-              <span class="axis axis-ns">NS</span>
-              <button class="step" id="btnNsMinus" aria-label="Less green for north-south">&minus;</button>
-              <b id="nsGreenVal">20</b>
-              <button class="step" id="btnNsPlus" aria-label="More green for north-south">&plus;</button>
-              <span class="unit-s">s green</span>
-            </div>
-            <div class="green-row">
-              <span class="axis axis-ew">EW</span>
-              <button class="step" id="btnEwMinus" aria-label="Less green for east-west">&minus;</button>
-              <b id="ewGreenVal">20</b>
-              <button class="step" id="btnEwPlus" aria-label="More green for east-west">&plus;</button>
-              <span class="unit-s">s green</span>
-            </div>
+          <div class="preset-row">
+            <button class="preset" id="btnPresetNs"><b>FAVOUR NS</b><em>64 / 36</em></button>
+            <button class="preset" id="btnPresetBal"><b>BALANCE</b><em>50 / 50</em></button>
+            <button class="preset" id="btnPresetEw"><b>FAVOUR EW</b><em>36 / 64</em></button>
           </div>
+
           <div class="countdown">
             <span id="phaseName">NS GREEN</span>
             <b id="phaseCount">0.0s</b>
           </div>
+
+          <details class="adv">
+            <summary>Fine timing</summary>
+            <div class="green-rows">
+              <div class="green-row">
+                <span class="axis axis-ns">NS</span>
+                <button class="step" id="btnNsMinus" aria-label="Less green for north-south">&minus;</button>
+                <b id="nsGreenVal">20</b>
+                <button class="step" id="btnNsPlus" aria-label="More green for north-south">&plus;</button>
+                <span class="unit-s">s green</span>
+              </div>
+              <div class="green-row">
+                <span class="axis axis-ew">EW</span>
+                <button class="step" id="btnEwMinus" aria-label="Less green for east-west">&minus;</button>
+                <b id="ewGreenVal">20</b>
+                <button class="step" id="btnEwPlus" aria-label="More green for east-west">&plus;</button>
+                <span class="unit-s">s green</span>
+              </div>
+            </div>
+          </details>
         </div>
 
         <div class="block">
@@ -403,7 +440,9 @@
             <li>Click a road to reallocate lanes or close the segment.</li>
             <li>Authorise an emergency corridor when a response vehicle is en route.</li>
             <li>Scroll to zoom, drag to pan, double-click a junction to focus it.</li>
-            <li>The timeline along the bottom shows what is coming next.</li>
+            <li>The timeline along the bottom shows what is coming next. <b>NEXT EVENT</b> fast-forwards to just before
+              the next scheduled one instead of waiting it out.</li>
+            <li>Map layers switch the link colouring, place names and the bus network on and off.</li>
           </ul>
           <h4 class="how-sub">KEYS</h4>
           <ul class="key-list">
@@ -411,6 +450,7 @@
             <li><kbd>1</kbd><kbd>2</kbd><kbd>4</kbd> simulation speed</li>
             <li><kbd>&larr;</kbd><kbd>&rarr;</kbd> previous / next junction</li>
             <li><kbd>F</kbd> fit network &middot; <kbd>ESC</kbd> clear selection</li>
+            <li><kbd>N</kbd> next scheduled event &middot; <kbd>R</kbd> revert last decision</li>
           </ul>
         </div>
         <div class="how-col">
@@ -451,6 +491,16 @@
       <div class="report-section">
         <h4>SCORE COMPOSITION</h4>
         <div id="scoreList"></div>
+      </div>
+
+      <div class="report-section">
+        <h4>AGAINST DOING NOTHING</h4>
+        <p class="section-note">The same seed, the same demand curve and the same incidents of this scenario, with no
+          interventions applied at all — the inherited signal plan left to run the day by itself. Both runs are measured
+          by the same simulation, so the comparison is a counterfactual rather than an estimate.</p>
+        <div id="baselineTable" class="baseline-table">
+          <div class="baseline-state" id="baselineState">Running the unmanaged reference…</div>
+        </div>
       </div>
 
       <div class="report-section">

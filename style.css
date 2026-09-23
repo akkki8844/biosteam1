@@ -147,6 +147,19 @@ kbd{
 .speed:hover{background:rgba(255,255,255,.05);color:var(--text)}
 .speed.active{background:var(--accent-soft);color:var(--accent)}
 
+/* Pacing. Skipping the quiet stretches is what makes a seven-minute shift
+   playable in five, so it sits with the clock rather than buried in a menu. */
+.skip{
+  display:flex;align-items:center;gap:8px;margin-left:2px;
+  padding:6px 11px;border-radius:8px;border:1px solid var(--line-2);
+  font-size:9.5px;letter-spacing:.1em;color:var(--text-2);transition:.15s;
+}
+.skip b{font-family:var(--mono);font-size:9px;font-weight:400;color:var(--faint);font-variant-numeric:tabular-nums}
+.skip:hover{background:rgba(255,255,255,.06);color:var(--text);border-color:rgba(255,255,255,.24)}
+.skip[disabled]{opacity:.32;pointer-events:none}
+.skip.flying{border-color:rgba(63,191,174,.55);color:var(--accent)}
+.skip.flying b{color:var(--accent)}
+
 /* ============================ METRICS ============================ */
 
 #metrics{
@@ -232,10 +245,26 @@ kbd{
 .evcard .ev-body{font-size:11px;color:var(--text-2);line-height:1.55}
 @keyframes cardIn{from{opacity:0;transform:translateX(-22px) scale(.97)}to{opacity:1;transform:none}}
 
+/* Layer switches sit above the zoom controls: a small console for choosing what
+   the map is showing, rather than six more controls in the panel. */
+#layerCtrls{
+  position:absolute;z-index:6;display:flex;align-items:center;gap:5px;
+  right:calc(var(--gutter) + var(--panel-w) + 10px);
+  top:calc(var(--gutter) + var(--topbar-h) + var(--metrics-h) + 24px);
+}
+.lc-cap{font-size:8px;letter-spacing:.16em;color:var(--faint);margin-right:2px;writing-mode:initial}
+.lchip{
+  padding:4px 8px;border-radius:6px;border:1px solid var(--line);
+  background:var(--panel);backdrop-filter:blur(14px);
+  font-size:8.5px;letter-spacing:.11em;color:var(--faint);transition:.15s;
+}
+.lchip:hover{color:var(--text-2);border-color:var(--line-2)}
+.lchip.on{color:var(--accent);border-color:rgba(63,191,174,.45);background:rgba(63,191,174,.1)}
+
 #viewCtrls{
   position:absolute;z-index:6;display:flex;flex-direction:column;gap:5px;
   right:calc(var(--gutter) + var(--panel-w) + 10px);
-  top:calc(var(--gutter) + var(--topbar-h) + var(--metrics-h) + 24px);
+  top:calc(var(--gutter) + var(--topbar-h) + var(--metrics-h) + 58px);
 }
 .vbtn{
   width:30px;height:28px;border-radius:7px;font-size:13px;line-height:1;
@@ -289,8 +318,88 @@ kbd{
 .detail{padding:13px 14px 16px}
 .hint{font-size:10px;line-height:1.6;color:#5b6570;margin-top:9px}
 
+/* --- panel head tools --- */
+.head-tools{display:flex;align-items:center;gap:9px}
+.revert{
+  font-family:var(--mono);font-size:8.5px;letter-spacing:.12em;
+  padding:3px 8px;border-radius:5px;border:1px solid var(--line-2);color:var(--muted);
+  transition:.15s;
+}
+.revert:hover{background:rgba(255,255,255,.07);color:var(--text)}
+.revert[disabled]{opacity:.28;pointer-events:none}
+.revert.hot{border-color:rgba(215,162,63,.5);color:var(--warn)}
+
+/* --- network advisory --- */
+.advisory{display:flex;flex-direction:column;gap:7px}
+.adv-card{
+  border:1px solid var(--line);border-left:2px solid var(--muted);
+  border-radius:8px;padding:9px 11px;background:rgba(255,255,255,.02);
+  text-align:left;width:100%;display:block;transition:.15s;
+}
+.adv-card:hover{background:rgba(255,255,255,.055);border-color:var(--line-2)}
+.adv-card.crit{border-left-color:var(--bad);background:rgba(208,90,78,.06)}
+.adv-card.warn{border-left-color:var(--warn)}
+.adv-card.good{border-left-color:var(--good)}
+.adv-title{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin-bottom:4px}
+.adv-title b{font-size:10.5px;font-weight:600;letter-spacing:.06em}
+.adv-title span{font-family:var(--mono);font-size:8.5px;color:var(--muted);white-space:nowrap}
+.adv-body{font-size:10.5px;line-height:1.6;color:var(--text-2)}
+.adv-act{
+  display:inline-block;margin-top:7px;font-family:var(--mono);font-size:8.5px;letter-spacing:.12em;
+  padding:3px 8px;border-radius:5px;border:1px solid rgba(63,191,174,.45);
+  background:rgba(63,191,174,.1);color:var(--accent);
+}
+.adv-act.urgent{border-color:rgba(72,201,216,.55);background:rgba(72,201,216,.12);color:#a9e5ee}
+.adv-empty{font-size:10.5px;color:var(--faint);line-height:1.6;padding:2px 0}
+
+/* --- objectives --- */
+.objectives{display:flex;flex-direction:column;gap:8px}
+.obj{display:flex;align-items:center;gap:9px}
+.obj-mark{
+  width:14px;height:14px;border-radius:4px;flex:0 0 auto;display:grid;place-items:center;
+  border:1px solid var(--line-2);font-size:9px;color:var(--muted);font-family:var(--mono);
+}
+.obj.met .obj-mark{border-color:rgba(79,190,141,.6);background:rgba(79,190,141,.14);color:var(--good)}
+.obj-body{flex:1;min-width:0}
+.obj-label{font-size:10px;color:var(--text-2);line-height:1.35;margin-bottom:3px}
+.obj.met .obj-label{color:var(--text)}
+.obj-track{height:3px;border-radius:2px;background:rgba(255,255,255,.06);overflow:hidden}
+.obj-track i{display:block;height:100%;background:var(--warn);transition:width .4s}
+.obj.met .obj-track i{background:var(--good)}
+.obj-val{font-family:var(--mono);font-size:9.5px;color:var(--muted);flex:0 0 auto;white-space:nowrap}
+.obj.met .obj-val{color:var(--good)}
+
+/* --- signal presets --- */
+.preset-row{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:9px}
+.preset{
+  padding:7px 6px;border-radius:7px;border:1px solid var(--line-2);
+  display:flex;flex-direction:column;gap:2px;align-items:center;
+  transition:.15s;color:var(--text-2);
+}
+.preset:hover{background:rgba(255,255,255,.06);border-color:rgba(255,255,255,.22);color:var(--text)}
+.preset:active{transform:translateY(1px)}
+.preset b{font-size:8.5px;letter-spacing:.1em;font-weight:600}
+.preset em{font-family:var(--mono);font-style:normal;font-size:8px;color:var(--muted)}
+.preset.on{border-color:rgba(63,191,174,.5);background:rgba(63,191,174,.12);color:var(--accent)}
+.preset.on em{color:rgba(63,191,174,.8)}
+.adv .green-rows{margin-top:11px;margin-bottom:0}
+
+/* --- pinned objectives ------------------------------------------------
+   Outside #panelBody on purpose: the goal has to survive opening a junction,
+   which is exactly when a player is making the decision it measures. */
+.obj-strip{
+  flex:0 0 auto;padding:10px 14px 11px;
+  border-bottom:1px solid var(--line);background:rgba(255,255,255,.012);
+}
+.obj-strip-head{
+  display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;
+  font-size:8.5px;letter-spacing:.15em;color:var(--muted);
+}
+.obj-ref{font-size:9px;line-height:1.5;color:var(--faint);margin-top:8px}
+.obj-ref b{font-family:var(--mono);font-weight:400;color:var(--muted)}
+
 /* --- live score composition --- */
-.live-scores{display:flex;flex-direction:column;gap:6px}
+.live-scores{display:flex;flex-direction:column;gap:6px;margin-top:11px}
 .ls-row{display:flex;align-items:center;gap:9px}
 .ls-row span{flex:0 0 76px;font-size:8.5px;letter-spacing:.11em;color:var(--muted)}
 .ls-row i{flex:1;height:4px;border-radius:2px;background:rgba(255,255,255,.06);overflow:hidden}
@@ -434,6 +543,30 @@ kbd{
 .lane-bar.rev{justify-content:flex-end}
 .lane-bar i{display:block;height:100%;background:linear-gradient(90deg,rgba(63,191,174,.7),rgba(63,191,174,.35));transition:width .3s}
 .lane-bar.rev i{background:linear-gradient(270deg,rgba(120,150,190,.7),rgba(120,150,190,.35))}
+
+/* ============================ BASELINE COMPARISON ============================ */
+
+.baseline-state{font-size:11.5px;color:var(--muted);padding:12px 0}
+.baseline-table{display:flex;flex-direction:column;gap:2px;margin-top:12px}
+.bl-head,.bl-row{display:grid;grid-template-columns:1fr 92px 92px 104px;gap:10px;align-items:center;padding:8px 12px}
+.bl-head{
+  font-family:var(--mono);font-size:8.5px;letter-spacing:.13em;color:var(--faint);
+  border-bottom:1px solid var(--line);padding-bottom:6px;
+}
+.bl-head span:not(:first-child){text-align:right}
+.bl-row{
+  background:rgba(255,255,255,.018);border-radius:6px;
+  font-size:11.5px;color:var(--text-2);
+}
+.bl-row:nth-child(even){background:rgba(255,255,255,.032)}
+.bl-row i,.bl-row b{font-family:var(--mono);font-style:normal;font-weight:400;
+  font-variant-numeric:tabular-nums;text-align:right;color:var(--muted)}
+.bl-row b{color:var(--text)}
+.bl-row .better{color:var(--good)}
+.bl-row .worse{color:var(--bad)}
+.bl-row .flat{color:var(--faint)}
+.bl-verdict{margin-top:12px;font-size:12px;line-height:1.75;color:var(--text-2)}
+.bl-verdict b{color:var(--text);font-weight:600}
 
 /* ============================ DAY TIMELINE ============================ */
 
